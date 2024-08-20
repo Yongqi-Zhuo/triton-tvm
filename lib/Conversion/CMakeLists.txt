@@ -1,5 +1,5 @@
 add_triton_library(TritonGPUToTVM
-  TritonGPUToTVMPass.cpp
+  TritonGPUToTVM.cpp
 
   DEPENDS
   TVMTableGen

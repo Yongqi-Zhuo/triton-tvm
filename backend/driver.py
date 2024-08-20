@@ -1,6 +1,9 @@
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
 
+# Use full path because Triton loads this module dynamically.
+from triton.backends.triton_tvm.grid_stealer import patch_kernel_interface
+
 
 # This is no-op.
 class TVMLauncher(object):
@@ -52,6 +55,7 @@ class TVMDriver(DriverBase):
         self.utils = TVMUtils()
         self.launcher_cls = TVMLauncher
         self.binary_ext = "tvmir"
+        patch_kernel_interface()
 
     # Remember to use triton.runtime.driver.set_active(TVMDriver())
     @staticmethod

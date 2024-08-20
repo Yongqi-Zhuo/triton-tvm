@@ -9,8 +9,9 @@
 namespace py = pybind11;
 
 void init_triton_tvm_passes_ttgpuir(py::module &&m) {
-  ADD_PASS_WRAPPER_0("add_convert_to_tvm",
-                     mlir::triton::gpu::createConvertTritonGPUToTVMPass);
+  ADD_PASS_WRAPPER_3("add_convert_to_tvm",
+                     mlir::triton::gpu::createConvertTritonGPUToTVMPass, int,
+                     int, int);
 }
 
 void init_triton_triton_tvm(py::module &&m) {

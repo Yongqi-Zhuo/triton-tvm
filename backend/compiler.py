@@ -5,6 +5,9 @@ from typing import Any
 import hashlib
 import functools
 
+# Use full path because Triton loads this module dynamically.
+from triton.backends.triton_tvm.grid_stealer import retrieve_stolen_grid
+
 
 @dataclass(frozen=True)
 class TVMOptions:
@@ -117,9 +120,10 @@ class TVMBackend(BaseBackend):
     @staticmethod
     def make_tvmir(mod, metadata, opt):
         metadata["name"] = "kernel_main"
+        grid_0, grid_1, grid_2 = retrieve_stolen_grid()
         pm = ir.pass_manager(mod.context)
         pm.enable_debug()
-        triton_tvm.passes.ttgpuir.add_convert_to_tvm(pm)
+        triton_tvm.passes.ttgpuir.add_convert_to_tvm(pm, grid_0, grid_1, grid_2)
         pm.run(mod)
         return mod
 

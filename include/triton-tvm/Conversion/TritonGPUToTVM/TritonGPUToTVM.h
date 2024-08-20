@@ -10,7 +10,8 @@ namespace mlir {
 namespace triton {
 namespace gpu {
 
-std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonGPUToTVMPass();
+std::unique_ptr<OperationPass<ModuleOp>>
+createConvertTritonGPUToTVMPass(int gridDimX, int gridDimY, int gridDimZ);
 
 } // namespace gpu
 } // namespace triton

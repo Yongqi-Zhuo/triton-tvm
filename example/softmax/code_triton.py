@@ -8,7 +8,7 @@ triton.runtime.driver.set_active(TVMDriver())
 
 
 @triton.jit
-def softmax_kernel(output_ptr, input_ptr, input_row_stride, output_row_stride, n_cols, BLOCK_SIZE: tl.constexpr):
+def softmax_kernel(output_ptr, input_ptr, input_row_stride: tl.constexpr, output_row_stride: tl.constexpr, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     # The rows of the softmax are independent, so we parallelize across those
     row_idx = tl.program_id(0)
     # The stride represents how much we need to increase the pointer to advance 1 row

@@ -6,6 +6,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 
+#include "triton-tvm/Conversion/TritonGPUToTVM/TritonGPUToTVM.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritongpu-to-tvm"
@@ -18,14 +19,32 @@ using namespace mlir;
 namespace {
 
 class TritonGPUToTVMPass : public TritonGPUToTVMBase<TritonGPUToTVMPass> {
+  std::array<int, 3> gridDim;
+
 public:
+  TritonGPUToTVMPass(int gridDimX, int gridDimY, int gridDimZ)
+      : gridDim{gridDimX, gridDimY, gridDimZ} {}
+
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, memref::MemRefDialect,
                     triton::gpu::TritonGPUDialect, tvm::TVMDialect>();
   }
   void runOnOperation() override {
     auto moduleOp = getOperation();
+
+    llvm::errs() << "gridDim { .X = " << gridDim[0] << ", .Y = " << gridDim[1]
+                 << ", .Z = " << gridDim[2] << " }\n";
+
     moduleOp.walk([&](triton::FuncOp func) {
+      // make sure all integer parameters are constants, because TVM TensorIR
+      // only supports constant integer values
+      for (auto argType : func.getArgumentTypes()) {
+        if (!isa<triton::PointerType>(argType)) {
+          func.emitError("only pointer arguments are supported");
+          return signalPassFailure();
+        }
+      }
+
       OpBuilder b(func);
 
       constexpr int64_t numRows = 128, numCols = 512, numWarps = 4,
@@ -124,8 +143,9 @@ public:
 
 namespace mlir::triton::gpu {
 
-std::unique_ptr<OperationPass<ModuleOp>> createConvertTritonGPUToTVMPass() {
-  return std::make_unique<TritonGPUToTVMPass>();
+std::unique_ptr<OperationPass<ModuleOp>>
+createConvertTritonGPUToTVMPass(int gridDimX, int gridDimY, int gridDimZ) {
+  return std::make_unique<TritonGPUToTVMPass>(gridDimX, gridDimY, gridDimZ);
 }
 
 } // namespace mlir::triton::gpu
