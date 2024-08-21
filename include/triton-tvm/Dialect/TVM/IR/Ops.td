@@ -263,6 +263,30 @@ def TVM_RefOp : TVM_Op<"ref", [
 
 }
 
+def TVM_IfThenElseOp : TVM_Op<"if_then_else", [
+  Pure,
+  AllTypesMatch<["true_value", "false_value", "result"]>
+]> {
+
+  let summary = "Equivalent to T.if_then_else in TVM TensorIR.";
+
+  let description = [{
+    Conditional expression.
+
+    Example:
+    ```mlir
+      %3 = tvm.if_then_else %0, %1, %2 : f32
+    ```
+  }];
+
+  let arguments = (ins I1:$condition, AnyType:$true_value, AnyType:$false_value);
+
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "operands attr-dict `:` type($result)";
+
+}
+
 def TVM_ReadOp : TVM_Op<"read"> {
 
   let summary = "Equivalent to T.reads in TVM TensorIR.";
@@ -276,9 +300,9 @@ def TVM_ReadOp : TVM_Op<"read"> {
     ```
   }];
 
-  let arguments = (ins AnyType:$ref);
+  let arguments = (ins Variadic<AnyType>:$refs);
 
-  let assemblyFormat = "$ref attr-dict `:` type($ref)";
+  let assemblyFormat = "attr-dict ($refs^ `:` type($refs))?";
 
   // TODO: Verify that the operand is a ref.
 
@@ -297,9 +321,9 @@ def TVM_WriteOp : TVM_Op<"write"> {
     ```
   }];
 
-  let arguments = (ins AnyType:$ref);
+  let arguments = (ins Variadic<AnyType>:$refs);
 
-  let assemblyFormat = "$ref attr-dict `:` type($ref)";
+  let assemblyFormat = "attr-dict ($refs^ `:` type($refs))?";
 
   // TODO: Verify that the operand is a ref.
 
@@ -320,7 +344,7 @@ def TVM_AssignOp : TVM_Op<"assign", [AllTypesMatch<["lhs", "rhs"]>]> {
 
   let arguments = (ins AnyType:$lhs, AnyType:$rhs);
 
-  let assemblyFormat = "$lhs `=` $rhs attr-dict `:` type($lhs)";
+  let assemblyFormat = "attr-dict $lhs `=` $rhs `:` type($lhs)";
 
 }
 

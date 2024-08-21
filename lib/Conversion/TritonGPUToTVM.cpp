@@ -52,9 +52,7 @@ public:
 
       std::string name = (func.getName() + "_tvm").str();
       auto type = b.getFunctionType(
-          {MemRefType::get(ArrayRef<int64_t>{numRows, numCols},
-                           b.getF32Type())},
-          {});
+          {MemRefType::get({numRows, numCols}, b.getF32Type())}, {});
 
       Location loc = func.getLoc();
 
@@ -114,8 +112,8 @@ public:
                               loc, arg, ValueRange{iRows, iCols});
                           auto refWrite =
                               b.create<tvm::RefOp>(loc, max, ValueRange{iRows});
-                          b.create<tvm::ReadOp>(loc, refRead);
-                          b.create<tvm::WriteOp>(loc, refWrite);
+                          b.create<tvm::ReadOp>(loc, ValueRange{refRead});
+                          b.create<tvm::WriteOp>(loc, ValueRange{refWrite});
                           b.create<tvm::InitOp>(loc, [&](OpBuilder &b,
                                                          Location loc) {
                             auto arithMin = arith::ConstantOp::materialize(

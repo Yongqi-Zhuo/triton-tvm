@@ -29,3 +29,6 @@ cmake-build-*
 
 # Vim
 *.swp
+
+# For now, do not upload examples
+/example/
