@@ -85,6 +85,60 @@ def ReturnOp : TVM_Op<"return", [Pure, HasParent<"FuncOp">,
 
 }
 
+def TVM_VarOp : TVM_Op<"var", [NoMemoryEffect]> {
+
+  let summary = "Equivalent to T.{dtype}() in TVM TensorIR.";
+
+  let description = [{
+    Declares a variable. Only index is supported for now.
+
+    Example:
+    ```mlir
+      %0 = tvm.var : index
+    ```
+  }];
+
+  let arguments = (ins);
+
+  let results = (outs Index:$result);
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+
+}
+
+def TVM_MatchBufferOp : TVM_Op<"match_buffer", [NoMemoryEffect]> {
+
+  let summary = "Equivalent to T.match_buffer in TVM TensorIR.";
+
+  let description = [{
+    Matches a buffer.
+
+    Example:
+    ```mlir
+      %2 = tvm.match_buffer %0 to [%1, 128] : memref<?x128xf32>
+    ```
+  }];
+
+  let arguments = (ins AnyRankedOrUnrankedMemRef:$source,
+                       Variadic<Index>:$sizes,
+                       DenseI64ArrayAttr:$static_sizes);
+
+  let results = (outs AnyMemRef:$result);
+
+  let builders = [
+    OpBuilder<(ins "MemRefType":$resultType, "Value":$source,
+      "ArrayRef<OpFoldResult>":$sizes,
+      CArg<"ArrayRef<NamedAttribute>", "{}">:$attrs)>,
+  ];
+
+  let assemblyFormat = [{
+    $source `to`
+    custom<DynamicIndexList>($sizes, $static_sizes)
+    attr-dict `:` type($source) `to` type($result)
+  }];
+
+}
+
 def TVM_AllocBufferOp : TVM_Op<"alloc_buffer"> {
 
   let summary = "Equivalent to T.alloc_buffer in TVM TensorIR.";
@@ -108,48 +162,6 @@ def TVM_AllocBufferOp : TVM_Op<"alloc_buffer"> {
   }];
 
   let assemblyFormat = "`(` `)` attr-dict `:` type($memref)";
-
-}
-
-def TVM_ForOp : TVM_Op<"for", [
-  NoTerminator,
-  SingleBlock,
-  RecursiveMemoryEffects,
-]> {
-
-  let summary = "Equivalent to for loops in TVM TensorIR.";
-
-  let description = [{
-    Declares a for loop with the specified kind and thread and the region.
-
-    Example:
-    ```mlir
-      tvm.for %i = serial 0 to 10 {
-        // Region
-      }
-      tvm.for %j = thread_binding("blockIdx.x") 0 to 10 {
-        // Region
-      }
-    ```
-  }];
-
-  let arguments = (ins IndexAttr:$start, IndexAttr:$stop, TVM_ForKind:$kind, OptionalAttr<StrAttr>:$thread);
-
-  let regions = (region SizedRegion<1>:$region);
-
-  let skipDefaultBuilders = 1;
-  let builders = [
-    OpBuilder<(ins "IntegerAttr":$start, "IntegerAttr":$stop, "ForKindAttr":$kind, CArg<"std::optional<StringAttr>", "std::nullopt">:$thread,
-    CArg<"function_ref<void(OpBuilder &, Location, Value)>", "nullptr">)>,
-  ];
-
-  let extraClassDeclaration = [{
-    Value getInductionVar() { return getBody()->getArgument(0); }
-  }];
-
-  let hasCustomAssemblyFormat = 1;
-
-  // TODO: Add verification for the thread attribute.
 
 }
 

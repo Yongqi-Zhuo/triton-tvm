@@ -10,7 +10,9 @@ An MLIR dialect for TVM TensorIR is devised.
 
 | TensorIR | TVM Dialect | Notes |
 |----------|-------------|-------|
-| `for k in range(n): ...` | `tvm.for %k = serial 0 to n` | `serial`, `parallel`, `vectorized`, `unroll`, `thread_binding` |
+| `for k in range(n): ...` | `scf.for {tvm.for_kind = serial}` | `serial`, `parallel`, `vectorized`, `unroll`, `thread_binding` |
+| `T.int()` | `tvm.var` | |
+| `T.match_buffer` | `tvm.match_buffer` | |
 | `T.alloc_buffer` | `tvm.alloc_buffer` | |
 | `T.block` | `tvm.block` | |
 | `T.where` | `tvm.where` | |
@@ -36,6 +38,6 @@ Basically, by pattern matching.
 | `tt.store` | `tvm.block` + `tvm.where` |
 | `tt.reduce` | Materialize with `tvm.block`, using implicit reduction axes. |
 | `arith.*` | Do NOT materialze. Keep in the form. |
-| `for k: ...` | `tvm.for serial` |
+| `for k: ...` | `scf.for {tvm.for_kind = serial}` |
 | `for k: ptrs += stride` | `ptrs = offset + k * stride` |
 | `for k: acc += ...` | Materialize with `tvm.block`, with `tvm.axis reduction k` |

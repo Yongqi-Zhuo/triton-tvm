@@ -1,7 +1,11 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
+#include <optional>
 
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
@@ -26,7 +30,7 @@ public:
       : gridDim{gridDimX, gridDimY, gridDimZ} {}
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, memref::MemRefDialect,
+    registry.insert<arith::ArithDialect, memref::MemRefDialect, scf::SCFDialect,
                     triton::gpu::TritonGPUDialect, tvm::TVMDialect>();
   }
   void runOnOperation() override {
@@ -47,12 +51,12 @@ public:
 
       OpBuilder b(func);
 
-      constexpr int64_t numRows = 128, numCols = 512, numWarps = 4,
+      constexpr int64_t kNumRows = 128, numCols = 512, numWarps = 4,
                         warpSize = 32, numThreads = numWarps * warpSize;
 
       std::string name = (func.getName() + "_tvm").str();
-      auto type = b.getFunctionType(
-          {MemRefType::get({numRows, numCols}, b.getF32Type())}, {});
+      auto type =
+          b.getFunctionType({UnrankedMemRefType::get(b.getF32Type(), {})}, {});
 
       Location loc = func.getLoc();
 
@@ -61,24 +65,35 @@ public:
       Block &entryBlock = tvmFunc.front();
       b.setInsertionPointToStart(&entryBlock);
 
-      Value arg = tvmFunc.getArgument(0);
+      auto numRows = b.create<tvm::VarOp>(loc).getResult();
+
+      auto arg = tvmFunc.getArgument(0);
+      auto shapedArg = b.create<tvm::MatchBufferOp>(
+          loc, MemRefType::get({ShapedType::kDynamic, numCols}, b.getF32Type()),
+          arg, ArrayRef<OpFoldResult>{numRows, b.getIndexAttr(numCols)});
 
       auto max = b.create<tvm::AllocBufferOp>(
-          loc, MemRefType::get({numRows}, b.getF32Type()), "shared");
+          loc, MemRefType::get({ShapedType::kDynamic}, b.getF32Type()),
+          "shared");
 
-      b.create<tvm::ForOp>(
-          loc, b.getIndexAttr(0), b.getIndexAttr(numRows),
+      auto c0 = arith::ConstantOp::materialize(b, b.getIndexAttr(0),
+                                               b.getIndexType(), loc);
+      auto cNumThreads = arith::ConstantOp::materialize(
+          b, b.getIndexAttr(numThreads), b.getIndexType(), loc);
+      auto cNumGroups = arith::ConstantOp::materialize(
+          b, b.getIndexAttr(numCols / numThreads), b.getIndexType(), loc);
+      auto for0 = tvm::ForOp::create(
+          b, loc, c0, numRows,
           b.getAttr<tvm::ForKindAttr>(tvm::ForKind::THREAD_BINDING),
           b.getStringAttr("blockIdx.x"),
           [&](OpBuilder &b, Location loc, Value varRows) {
-            b.create<tvm::ForOp>(
-                loc, b.getIndexAttr(0), b.getIndexAttr(numThreads),
+            auto for1 = tvm::ForOp::create(
+                b, loc, c0, cNumThreads,
                 b.getAttr<tvm::ForKindAttr>(tvm::ForKind::THREAD_BINDING),
                 b.getStringAttr("threadIdx.x"),
                 [&](OpBuilder &b, Location loc, Value varCols0) {
-                  b.create<tvm::ForOp>(
-                      loc, b.getIndexAttr(0),
-                      b.getIndexAttr(numCols / numThreads),
+                  auto for2 = tvm::ForOp::create(
+                      b, loc, c0, cNumGroups,
                       b.getAttr<tvm::ForKindAttr>(tvm::ForKind::UNROLL),
                       std::nullopt,
                       [&](OpBuilder &b, Location loc, Value varCols1) {
@@ -109,7 +124,7 @@ public:
                                   tvm::AxisKind::REDUCTION),
                               arithAdded.getResult());
                           auto refRead = b.create<tvm::RefOp>(
-                              loc, arg, ValueRange{iRows, iCols});
+                              loc, shapedArg, ValueRange{iRows, iCols});
                           auto refWrite =
                               b.create<tvm::RefOp>(loc, max, ValueRange{iRows});
                           b.create<tvm::ReadOp>(loc, ValueRange{refRead});

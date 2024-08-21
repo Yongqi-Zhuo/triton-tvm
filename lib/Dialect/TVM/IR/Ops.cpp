@@ -37,92 +37,16 @@ void FuncOp::print(OpAsmPrinter &p) {
       getArgAttrsAttrName(), getResAttrsAttrName());
 }
 
-void ForOp::build(
-    OpBuilder &builder, OperationState &result, IntegerAttr start,
-    IntegerAttr stop, ForKindAttr kind, std::optional<StringAttr> thread,
-    function_ref<void(OpBuilder &, Location, Value)> bodyBuilder) {
-  OpBuilder::InsertionGuard guard(builder);
-
-  result.addAttribute("start", start);
-  result.addAttribute("stop", stop);
-  result.addAttribute("kind", kind);
-  if (thread)
-    result.addAttribute("thread", *thread);
-
-  Region *bodyRegion = result.addRegion();
-  Block *bodyBlock = builder.createBlock(bodyRegion);
-  bodyBlock->addArgument(builder.getIndexType(), result.location);
-
-  if (bodyBuilder) {
-    builder.setInsertionPointToStart(bodyBlock);
-    bodyBuilder(builder, result.location, bodyBlock->getArgument(0));
-  }
-}
-
-void ForOp::print(OpAsmPrinter &p) {
-  p << ' ' << getInductionVar() << " = " << getKind();
-  if (getThread()) {
-    p << '(';
-    p.printString(*getThread());
-    p << ')';
-  }
-  p << ' ' << getStart() << " to " << getStop() << ' ';
-  p.printRegion(getRegion(),
-                /*printEntryBlockArgs=*/false);
-  p.printOptionalAttrDict((*this)->getAttrs(),
-                          {"start", "stop", "kind", "thread"});
-}
-
-ParseResult ForOp::parse(OpAsmParser &parser, OperationState &result) {
-  auto &builder = parser.getBuilder();
-
-  // Parse the induction variable followed by '='.
-  OpAsmParser::Argument inductionVariable;
-  if (parser.parseOperand(inductionVariable.ssaName) || parser.parseEqual())
-    return failure();
-  inductionVariable.type = builder.getIndexType();
-
-  // Parse kind.
-  StringRef kindString;
-  if (parser.parseKeyword(&kindString))
-    return failure();
-  ForKind kind;
-  if (auto k = symbolizeForKind(kindString); k) {
-    kind = *k;
-  } else {
-    return parser.emitError(parser.getNameLoc(), "unknown kind: ")
-           << kindString;
-  }
-  result.addAttribute("kind", builder.getAttr<ForKindAttr>(kind));
-
-  // Parse optional thread attribute.
-  bool hasThread = succeeded(parser.parseOptionalLParen());
-  if (hasThread) {
-    std::string thread;
-    if (parser.parseString(&thread) || parser.parseRParen())
-      return failure();
-    result.addAttribute("thread", builder.getStringAttr(std::move(thread)));
-  }
-
-  // Parse loop bounds.
-  int64_t start, stop;
-  if (parser.parseInteger(start) || parser.parseKeyword("to") ||
-      parser.parseInteger(stop)) {
-    return failure();
-  }
-  result.addAttribute("start", builder.getIndexAttr(start));
-  result.addAttribute("stop", builder.getIndexAttr(stop));
-
-  // Parse the body region.
-  Region *body = result.addRegion();
-  if (parser.parseRegion(*body, {inductionVariable}))
-    return failure();
-
-  // Parse the optional attribute list.
-  if (parser.parseOptionalAttrDict(result.attributes))
-    return failure();
-
-  return success();
+void MatchBufferOp::build(OpBuilder &b, OperationState &result,
+                          MemRefType resultType, Value source,
+                          ArrayRef<OpFoldResult> sizes,
+                          ArrayRef<NamedAttribute> attrs) {
+  SmallVector<int64_t> staticSizes;
+  SmallVector<Value> dynamicSizes;
+  dispatchIndexOpFoldResults(sizes, dynamicSizes, staticSizes);
+  result.addAttributes(attrs);
+  build(b, result, resultType, source, dynamicSizes,
+        b.getDenseI64ArrayAttr(staticSizes));
 }
 
 void BlockOp::build(OpBuilder &builder, OperationState &result,
