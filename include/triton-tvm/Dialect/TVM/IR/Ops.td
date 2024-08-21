@@ -59,6 +59,7 @@ def TVM_FuncOp : TVM_Op<"func", [FunctionOpInterface, IsolatedFromAbove]> {
   }];
 
   let hasCustomAssemblyFormat = 1;
+
 }
 
 def ReturnOp : TVM_Op<"return", [Pure, HasParent<"FuncOp">,
@@ -111,7 +112,6 @@ def TVM_AllocBufferOp : TVM_Op<"alloc_buffer"> {
 }
 
 def TVM_ForOp : TVM_Op<"for", [
-  AutomaticAllocationScope,
   NoTerminator,
   SingleBlock,
   RecursiveMemoryEffects,
@@ -154,9 +154,9 @@ def TVM_ForOp : TVM_Op<"for", [
 }
 
 def TVM_BlockOp : TVM_Op<"block", [
-  AutomaticAllocationScope,
   NoTerminator,
   SingleBlock,
+  RecursiveMemoryEffects,
 ]> {
 
   let summary = "Equivalent to T.block in TVM TensorIR.";
@@ -185,7 +185,10 @@ def TVM_BlockOp : TVM_Op<"block", [
 
 }
 
-def TVM_WhereOp : TVM_Op<"where"> {
+def TVM_WhereOp : TVM_Op<"where", [
+  MemoryEffects<[MemRead<DefaultResource>]>,
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+]> {
 
   let summary = "Equivalent to T.where in TVM TensorIR.";
 
@@ -201,9 +204,10 @@ def TVM_WhereOp : TVM_Op<"where"> {
   let arguments = (ins I1:$condition);
 
   let assemblyFormat = "$condition attr-dict";
+
 }
 
-def TVM_AxisOp : TVM_Op<"axis", [SameOperandsAndResultType]> {
+def TVM_AxisOp : TVM_Op<"axis", [Pure, SameOperandsAndResultType]> {
 
   let summary = "Equivalent to T.axis in TVM TensorIR.";
 
@@ -245,9 +249,7 @@ def TVM_RefOp : TVM_Op<"ref", [
     ```
   }];
 
-  let arguments = (ins Arg<AnyMemRef,
-                           "the reference to load from/write to",
-                           [MemRead, MemWrite]>:$memref,
+  let arguments = (ins AnyMemRef:$memref,
                        Variadic<Index>:$indices);
   let results = (outs AnyType:$result);
 
@@ -287,7 +289,10 @@ def TVM_IfThenElseOp : TVM_Op<"if_then_else", [
 
 }
 
-def TVM_ReadOp : TVM_Op<"read"> {
+def TVM_ReadOp : TVM_Op<"read", [
+  MemoryEffects<[MemRead<DefaultResource>]>,
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+]> {
 
   let summary = "Equivalent to T.reads in TVM TensorIR.";
 
@@ -308,7 +313,10 @@ def TVM_ReadOp : TVM_Op<"read"> {
 
 }
 
-def TVM_WriteOp : TVM_Op<"write"> {
+def TVM_WriteOp : TVM_Op<"write", [
+  MemoryEffects<[MemRead<DefaultResource>]>,
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+]> {
 
   let summary = "Equivalent to T.writes in TVM TensorIR.";
 
@@ -329,7 +337,11 @@ def TVM_WriteOp : TVM_Op<"write"> {
 
 }
 
-def TVM_AssignOp : TVM_Op<"assign", [AllTypesMatch<["lhs", "rhs"]>]> {
+def TVM_AssignOp : TVM_Op<"assign", [
+  AllTypesMatch<["lhs", "rhs"]>,
+  MemoryEffects<[MemRead<DefaultResource>]>,
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+]> {
 
   let summary = "Equivalent to an assignment in TVM TensorIR.";
 
@@ -349,9 +361,9 @@ def TVM_AssignOp : TVM_Op<"assign", [AllTypesMatch<["lhs", "rhs"]>]> {
 }
 
 def TVM_InitOp : TVM_Op<"init", [
-  AutomaticAllocationScope,
   NoTerminator,
   SingleBlock,
+  RecursiveMemoryEffects,
 ]> {
 
   let summary = "Equivalent to T.init in TVM TensorIR.";
