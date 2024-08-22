@@ -1,8 +1,12 @@
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
+from typing import TYPE_CHECKING
 
-# Use full path because Triton loads this module dynamically.
-from triton.backends.triton_tvm.grid_stealer import patch_kernel_interface
+if TYPE_CHECKING:
+    from dims_stealer import patch_kernel_interface
+else:
+    # Use full path because Triton loads this module dynamically.
+    from triton.backends.triton_tvm.dims_stealer import patch_kernel_interface
 
 
 # This is no-op.

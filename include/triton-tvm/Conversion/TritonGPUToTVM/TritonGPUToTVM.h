@@ -11,7 +11,9 @@ namespace triton {
 namespace gpu {
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertTritonGPUToTVMPass(int gridDimX, int gridDimY, int gridDimZ);
+createConvertTritonGPUToTVMPass(std::array<int, 3> gridDim,
+                                std::vector<std::vector<int>> shapes,
+                                std::vector<std::vector<int>> strides);
 
 } // namespace gpu
 } // namespace triton

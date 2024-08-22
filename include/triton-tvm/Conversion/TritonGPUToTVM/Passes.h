@@ -6,7 +6,7 @@
 namespace mlir {
 namespace triton {
 
-#define GEN_PASS_REGISTRATION
+#define GEN_PASS_DECL
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
 
 } // namespace triton

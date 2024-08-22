@@ -10,6 +10,7 @@
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 
+#include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h"
 #include "triton-tvm/Conversion/TritonGPUToTVM/TritonGPUToTVM.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 
@@ -20,14 +21,20 @@ using namespace mlir;
 #define GEN_PASS_CLASSES
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
 
+struct StolenDims {
+  std::array<int, 3> gridDim;
+  std::vector<std::vector<int>> shapes;
+  std::vector<std::vector<int>> strides;
+};
+
 namespace {
 
 class TritonGPUToTVMPass : public TritonGPUToTVMBase<TritonGPUToTVMPass> {
-  std::array<int, 3> gridDim;
+  StolenDims stolenDims;
 
 public:
-  TritonGPUToTVMPass(int gridDimX, int gridDimY, int gridDimZ)
-      : gridDim{gridDimX, gridDimY, gridDimZ} {}
+  TritonGPUToTVMPass(StolenDims stolenDims)
+      : stolenDims(std::move(stolenDims)) {}
 
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<arith::ArithDialect, memref::MemRefDialect, scf::SCFDialect,
@@ -36,15 +43,32 @@ public:
   void runOnOperation() override {
     auto moduleOp = getOperation();
 
+    const auto &[gridDim, tensorShapes, tensorStrides] = stolenDims;
+
     llvm::errs() << "gridDim { .X = " << gridDim[0] << ", .Y = " << gridDim[1]
                  << ", .Z = " << gridDim[2] << " }\n";
+    for (const auto &sizes : tensorShapes) {
+      llvm::errs() << "sizes { ";
+      for (int size : sizes) {
+        llvm::errs() << size << ", ";
+      }
+      llvm::errs() << "}\n";
+    }
+    for (const auto &strides : tensorStrides) {
+      llvm::errs() << "strides { ";
+      for (int stride : strides) {
+        llvm::errs() << stride << ", ";
+      }
+      llvm::errs() << "}\n";
+    }
 
     moduleOp.walk([&](triton::FuncOp func) {
       // make sure all integer parameters are constants, because TVM TensorIR
       // only supports constant integer values
       for (auto argType : func.getArgumentTypes()) {
         if (!isa<triton::PointerType>(argType)) {
-          func.emitError("only pointer arguments are supported");
+          func.emitError("Only pointer arguments are supported.")
+              << " Got " << argType;
           return signalPassFailure();
         }
       }
@@ -147,7 +171,7 @@ public:
       b.setInsertionPointToEnd(&entryBlock);
       b.create<tvm::ReturnOp>(loc);
 
-      func.erase();
+      // func.erase();
     });
   }
 };
@@ -157,8 +181,14 @@ public:
 namespace mlir::triton::gpu {
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertTritonGPUToTVMPass(int gridDimX, int gridDimY, int gridDimZ) {
-  return std::make_unique<TritonGPUToTVMPass>(gridDimX, gridDimY, gridDimZ);
+createConvertTritonGPUToTVMPass(std::array<int, 3> gridDim,
+                                std::vector<std::vector<int>> shapes,
+                                std::vector<std::vector<int>> strides) {
+  return std::make_unique<TritonGPUToTVMPass>(StolenDims{
+      .gridDim = gridDim,
+      .shapes = shapes,
+      .strides = strides,
+  });
 }
 
 } // namespace mlir::triton::gpu
