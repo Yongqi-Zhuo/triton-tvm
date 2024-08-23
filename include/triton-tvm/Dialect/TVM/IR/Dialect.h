@@ -42,8 +42,9 @@ struct ForOp {
       OpBuilder &builder, Location loc, Value lowerBound, Value upperBound,
       ForKindAttr kind, std::optional<StringAttr> thread = std::nullopt,
       function_ref<void(OpBuilder &, Location, Value)> bodyBuilder = nullptr) {
-    auto c1 = arith::ConstantOp::materialize(builder, builder.getIndexAttr(1),
-                                             builder.getIndexType(), loc);
+    auto iterType = lowerBound.getType();
+    auto c1 = arith::ConstantOp::materialize(
+        builder, builder.getIntegerAttr(iterType, 1), iterType, loc);
     auto op = builder.create<scf::ForOp>(
         loc, lowerBound, upperBound, c1, std::nullopt,
         [bodyBuilder](OpBuilder &builder, Location loc, Value inductionVar,

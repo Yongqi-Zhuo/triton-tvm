@@ -95,23 +95,23 @@ public:
       Block &entryBlock = tvmFunc.front();
       b.setInsertionPointToStart(&entryBlock);
 
-      auto numRows = b.create<tvm::VarOp>(loc).getResult();
+      auto numRows = b.create<tvm::VarOp>(loc, b.getI32Type()).getResult();
 
       auto arg = tvmFunc.getArgument(0);
       auto shapedArg = b.create<tvm::MatchBufferOp>(
           loc, MemRefType::get({ShapedType::kDynamic, numCols}, b.getF32Type()),
-          arg, ArrayRef<OpFoldResult>{numRows, b.getIndexAttr(numCols)});
+          arg, ArrayRef<OpFoldResult>{numRows, b.getI32IntegerAttr(numCols)});
 
       auto max = b.create<tvm::AllocBufferOp>(
           loc, MemRefType::get({ShapedType::kDynamic}, b.getF32Type()),
           "shared");
 
-      auto c0 = arith::ConstantOp::materialize(b, b.getIndexAttr(0),
-                                               b.getIndexType(), loc);
+      auto c0 = arith::ConstantOp::materialize(b, b.getI32IntegerAttr(0),
+                                               b.getI32Type(), loc);
       auto cNumThreads = arith::ConstantOp::materialize(
-          b, b.getIndexAttr(numThreads), b.getIndexType(), loc);
+          b, b.getI32IntegerAttr(numThreads), b.getI32Type(), loc);
       auto cNumGroups = arith::ConstantOp::materialize(
-          b, b.getIndexAttr(numCols / numThreads), b.getIndexType(), loc);
+          b, b.getI32IntegerAttr(numCols / numThreads), b.getI32Type(), loc);
       auto for0 = tvm::ForOp::create(
           b, loc, c0, numRows,
           b.getAttr<tvm::ForKindAttr>(tvm::ForKind::THREAD_BINDING),
@@ -130,14 +130,14 @@ public:
                         b.create<tvm::BlockOp>(loc, [&](OpBuilder &b,
                                                         Location loc) {
                           auto arithMultiplier = arith::ConstantOp::materialize(
-                              b, b.getIndexAttr(numThreads), b.getIndexType(),
-                              loc);
+                              b, b.getI32IntegerAttr(numThreads),
+                              b.getI32Type(), loc);
                           auto arithMultiplied = b.create<arith::MulIOp>(
                               loc, varCols1, arithMultiplier.getResult());
                           auto arithAdded = b.create<arith::AddIOp>(
                               loc, varCols0, arithMultiplied.getResult());
                           auto arithBound = arith::ConstantOp::materialize(
-                              b, b.getIndexAttr(numCols), b.getIndexType(),
+                              b, b.getI32IntegerAttr(numCols), b.getI32Type(),
                               loc);
                           auto arithCmped = b.create<arith::CmpIOp>(
                               loc, arith::CmpIPredicate::ult,

@@ -87,10 +87,10 @@ def ReturnOp : TVM_Op<"return", [Pure, HasParent<"FuncOp">,
 
 def TVM_VarOp : TVM_Op<"var", [NoMemoryEffect]> {
 
-  let summary = "Equivalent to T.{dtype}() in TVM TensorIR.";
+  let summary = "Equivalent to T.var() in TVM TensorIR.";
 
   let description = [{
-    Declares a variable. Only index is supported for now.
+    Declares a variable.
 
     Example:
     ```mlir
@@ -100,7 +100,7 @@ def TVM_VarOp : TVM_Op<"var", [NoMemoryEffect]> {
 
   let arguments = (ins);
 
-  let results = (outs Index:$result);
+  let results = (outs AnyInteger:$result);
 
   let assemblyFormat = "attr-dict `:` type($result)";
 
@@ -119,8 +119,9 @@ def TVM_MatchBufferOp : TVM_Op<"match_buffer", [NoMemoryEffect]> {
     ```
   }];
 
+  // TODO: Do not use i32! Instead, promote all I32 to Index.
   let arguments = (ins AnyRankedOrUnrankedMemRef:$source,
-                       Variadic<Index>:$sizes,
+                       Variadic<I32>:$sizes,
                        DenseI64ArrayAttr:$static_sizes);
 
   let results = (outs AnyMemRef:$result);
@@ -228,16 +229,16 @@ def TVM_AxisOp : TVM_Op<"axis", [Pure, SameOperandsAndResultType]> {
 
     Example:
     ```mlir
-      %2 = tvm.axis spatial %0
-      %3 = tvm.axis reduce %1
+      %2 = tvm.axis spatial %0 : index
+      %3 = tvm.axis reduce %1 : index
     ```
   }];
 
-  let arguments = (ins TVM_AxisKind:$axis_kind, Index:$binding);
+  let arguments = (ins TVM_AxisKind:$axis_kind, AnyInteger:$binding);
 
-  let results = (outs Index);
+  let results = (outs AnyInteger:$result);
 
-  let assemblyFormat = "$axis_kind $binding attr-dict";
+  let assemblyFormat = "$axis_kind $binding attr-dict `:` type($result)";
 
 }
 
@@ -261,8 +262,9 @@ def TVM_RefOp : TVM_Op<"ref", [
     ```
   }];
 
+  // TODO: Do not use i32! Instead, promote all I32 to Index.
   let arguments = (ins AnyMemRef:$memref,
-                       Variadic<Index>:$indices);
+                       Variadic<I32>:$indices);
   let results = (outs AnyType:$result);
 
   let extraClassDeclaration = [{
