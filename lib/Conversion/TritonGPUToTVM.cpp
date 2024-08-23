@@ -3,34 +3,33 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/Support/Debug.h"
-#include <optional>
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h"
-#include "triton-tvm/Conversion/TritonGPUToTVM/TritonGPUToTVM.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 
 #define DEBUG_TYPE "tritongpu-to-tvm"
 
 using namespace mlir;
 
-#define GEN_PASS_CLASSES
-#include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
-
 struct StolenDims {
-  std::array<int, 3> gridDim;
-  std::vector<std::vector<int>> tensorShapes;
-  std::vector<std::vector<int>> tensorStrides;
+  SmallVector<int> gridDim;
+  SmallVector<SmallVector<int>> tensorShapes;
+  SmallVector<SmallVector<int>> tensorStrides;
 };
 
 namespace mlir::triton::gpu {
 
-class TritonGPUToTVMPass : public TritonGPUToTVMBase<TritonGPUToTVMPass> {
+#define GEN_PASS_DEF_TRITONGPUTOTVM
+#include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
+
+class TritonGPUToTVMPass : public impl::TritonGPUToTVMBase<TritonGPUToTVMPass> {
   StolenDims stolenDims;
 
 public:
@@ -44,8 +43,11 @@ public:
     const auto &tensorShapes = stolenDims.tensorShapes;
     const auto &tensorStrides = stolenDims.tensorStrides;
 
-    llvm::errs() << "gridDim { .X = " << gridDim[0] << ", .Y = " << gridDim[1]
-                 << ", .Z = " << gridDim[2] << " }\n";
+    llvm::errs() << "gridDim { ";
+    for (int dim : gridDim) {
+      llvm::errs() << dim << ", ";
+    }
+    llvm::errs() << "}\n";
     for (const auto &sizes : tensorShapes) {
       llvm::errs() << "sizes { ";
       for (int size : sizes) {
@@ -78,6 +80,14 @@ public:
                        "tensor shapes and strides.");
         return signalPassFailure();
       }
+
+      PassManager pm(&getContext(), func.getOperationName());
+      pm.addPass(createRewriteSPMDToLoops({gridDim}));
+      if (failed(runPipeline(pm, func))) {
+        signalPassFailure();
+      }
+
+      return;
 
       OpBuilder b(func);
 
@@ -183,9 +193,9 @@ public:
 };
 
 std::unique_ptr<OperationPass<ModuleOp>>
-createConvertTritonGPUToTVMPass(std::array<int, 3> gridDim,
-                                std::vector<std::vector<int>> tensorShapes,
-                                std::vector<std::vector<int>> tensorStrides) {
+createConvertTritonGPUToTVMPass(SmallVector<int> gridDim,
+                                SmallVector<SmallVector<int>> tensorShapes,
+                                SmallVector<SmallVector<int>> tensorStrides) {
   return std::make_unique<TritonGPUToTVMPass>(
       StolenDims{.gridDim = std::move(gridDim),
                  .tensorShapes = std::move(tensorShapes),

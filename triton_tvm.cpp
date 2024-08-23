@@ -1,6 +1,6 @@
 #include "mlir/Pass/PassManager.h"
 #include "passes.h"
-#include "triton-tvm/Conversion/TritonGPUToTVM/TritonGPUToTVM.h"
+#include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -9,10 +9,21 @@
 namespace py = pybind11;
 
 void init_triton_tvm_passes_ttgpuir(py::module &&m) {
-  using array3 = std::array<int, 3>;
-  ADD_PASS_WRAPPER_3(
-      "add_convert_to_tvm", mlir::triton::gpu::createConvertTritonGPUToTVMPass,
-      array3, std::vector<std::vector<int>>, std::vector<std::vector<int>>);
+  m.def("add_convert_to_tvm", [](mlir ::PassManager &pm, std::vector<int> val0,
+                                 std::vector<std::vector<int>> val1,
+                                 std::vector<std::vector<int>> val2) {
+    llvm::SmallVector<int> gridDim(val0.begin(), val0.end());
+    llvm::SmallVector<llvm::SmallVector<int>> tensorShapes;
+    for (auto &v : val1) {
+      tensorShapes.emplace_back(llvm::SmallVector<int>(v.begin(), v.end()));
+    }
+    llvm::SmallVector<llvm::SmallVector<int>> tensorStrides;
+    for (auto &v : val2) {
+      tensorStrides.emplace_back(llvm::SmallVector<int>(v.begin(), v.end()));
+    }
+    pm.addPass(mlir ::triton ::gpu ::createConvertTritonGPUToTVMPass(
+        gridDim, tensorShapes, tensorStrides));
+  });
 }
 
 void init_triton_triton_tvm(py::module &&m) {

@@ -1,4 +1,5 @@
 add_triton_library(TritonGPUToTVM
+  RewriteSPMDToLoops.cpp
   TritonGPUToTVM.cpp
 
   DEPENDS

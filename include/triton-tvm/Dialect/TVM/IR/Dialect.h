@@ -47,13 +47,11 @@ struct ForOp {
         builder, builder.getIntegerAttr(iterType, 1), iterType, loc);
     auto op = builder.create<scf::ForOp>(
         loc, lowerBound, upperBound, c1, std::nullopt,
-        [bodyBuilder](OpBuilder &builder, Location loc, Value inductionVar,
+        bodyBuilder ? [bodyBuilder](OpBuilder &builder, Location loc, Value inductionVar,
                       ValueRange) {
           bodyBuilder(builder, loc, inductionVar);
-          if (bodyBuilder) {
-            builder.create<scf::YieldOp>(loc);
-          }
-        });
+          builder.create<scf::YieldOp>(loc);
+        } : scf::ForOp::BodyBuilderFn{});
     op->setAttr(builder.getStringAttr(kAttrForKindName), kind);
     if (thread) {
       op->setAttr(builder.getStringAttr(tvm::kAttrForThreadName), *thread);

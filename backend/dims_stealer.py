@@ -3,7 +3,7 @@ import torch
 
 @dataclass(frozen=True)
 class StolenData:
-    grid: tuple[int, int, int]
+    grid: list[int]
     shapes: list[list[int]]
     strides: list[list[int]]
 
@@ -17,15 +17,11 @@ def _dim_stealer(self, grid):
         next_grid = grid
         if callable(next_grid):
             next_grid = next_grid(kwargs)
-        grid_size = len(next_grid)
-        grid_0: int = next_grid[0]
-        grid_1: int = next_grid[1] if grid_size > 1 else 1
-        grid_2: int = next_grid[2] if grid_size > 2 else 1
         tensors = [t for t in args if torch.is_tensor(t)]
         shapes = [list(t.shape) for t in tensors]
         strides = [list(t.stride()) for t in tensors]
         _STOLEN_DATA = StolenData(
-            grid=(grid_0, grid_1, grid_2),
+            grid=next_grid,
             shapes=shapes,
             strides=strides,
         )
