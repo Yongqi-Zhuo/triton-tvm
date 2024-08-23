@@ -7,6 +7,7 @@
 #include "llvm/Support/Debug.h"
 #include <optional>
 
+#include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Types.h"
 
@@ -23,11 +24,11 @@ using namespace mlir;
 
 struct StolenDims {
   std::array<int, 3> gridDim;
-  std::vector<std::vector<int>> shapes;
-  std::vector<std::vector<int>> strides;
+  std::vector<std::vector<int>> tensorShapes;
+  std::vector<std::vector<int>> tensorStrides;
 };
 
-namespace {
+namespace mlir::triton::gpu {
 
 class TritonGPUToTVMPass : public TritonGPUToTVMBase<TritonGPUToTVMPass> {
   StolenDims stolenDims;
@@ -36,14 +37,12 @@ public:
   TritonGPUToTVMPass(StolenDims stolenDims)
       : stolenDims(std::move(stolenDims)) {}
 
-  void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<arith::ArithDialect, memref::MemRefDialect, scf::SCFDialect,
-                    triton::gpu::TritonGPUDialect, tvm::TVMDialect>();
-  }
   void runOnOperation() override {
     auto moduleOp = getOperation();
 
-    const auto &[gridDim, tensorShapes, tensorStrides] = stolenDims;
+    const auto &gridDim = stolenDims.gridDim;
+    const auto &tensorShapes = stolenDims.tensorShapes;
+    const auto &tensorStrides = stolenDims.tensorStrides;
 
     llvm::errs() << "gridDim { .X = " << gridDim[0] << ", .Y = " << gridDim[1]
                  << ", .Z = " << gridDim[2] << " }\n";
@@ -63,14 +62,21 @@ public:
     }
 
     moduleOp.walk([&](triton::FuncOp func) {
-      // make sure all integer parameters are constants, because TVM TensorIR
-      // only supports constant integer values
+      // Make sure all integer parameters are constants, because we currently
+      // only support constant integer values.
       for (auto argType : func.getArgumentTypes()) {
         if (!isa<triton::PointerType>(argType)) {
           func.emitError("Only pointer arguments are supported.")
               << " Got " << argType;
           return signalPassFailure();
         }
+      }
+      // Also check that we have gathered all the tensor shapes and strides.
+      if (func.getNumArguments() != tensorShapes.size() ||
+          func.getNumArguments() != tensorStrides.size()) {
+        func.emitError("Number of arguments does not match the number of "
+                       "tensor shapes and strides.");
+        return signalPassFailure();
       }
 
       OpBuilder b(func);
@@ -176,19 +182,14 @@ public:
   }
 };
 
-} // namespace
-
-namespace mlir::triton::gpu {
-
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertTritonGPUToTVMPass(std::array<int, 3> gridDim,
-                                std::vector<std::vector<int>> shapes,
-                                std::vector<std::vector<int>> strides) {
-  return std::make_unique<TritonGPUToTVMPass>(StolenDims{
-      .gridDim = gridDim,
-      .shapes = shapes,
-      .strides = strides,
-  });
+                                std::vector<std::vector<int>> tensorShapes,
+                                std::vector<std::vector<int>> tensorStrides) {
+  return std::make_unique<TritonGPUToTVMPass>(
+      StolenDims{.gridDim = std::move(gridDim),
+                 .tensorShapes = std::move(tensorShapes),
+                 .tensorStrides = std::move(tensorStrides)});
 }
 
 } // namespace mlir::triton::gpu
