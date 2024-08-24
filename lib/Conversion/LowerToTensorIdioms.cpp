@@ -31,6 +31,37 @@ namespace mlir::triton {
 
 namespace {
 
+struct LoadToTensorConverter : public OpConversionPattern<triton::LoadOp> {
+  using OpConversionPattern<triton::LoadOp>::OpConversionPattern;
+  LogicalResult match(triton::LoadOp op) const override {
+    return success(isa<RankedTensorType>(op.getPtr().getType()));
+  }
+  void rewrite(triton::LoadOp op, OpAdaptor adaptor,
+               ConversionPatternRewriter &rewriter) const override {
+    auto type = cast<RankedTensorType>(op.getResult().getType());
+    auto tensorGenerate = rewriter.create<tensor::GenerateOp>(
+        op.getLoc(), type,
+        // All static dimensions
+        ValueRange{}, [&](OpBuilder &b, Location loc, ValueRange args) {
+          Value ptr = adaptor.getPtr();
+          Value mask = adaptor.getMask();
+          Value other = adaptor.getOther();
+          Value scalarPtr = b.create<tensor::ExtractOp>(loc, ptr, args);
+          Value scalarMask = b.create<tensor::ExtractOp>(loc, mask, args);
+          Value scalarOther = b.create<tensor::ExtractOp>(loc, other, args);
+          // TODO: Support block pointers.
+          // TODO: Support cache modifiers and eviction policies.
+          Value scalar =
+              b.create<triton::LoadOp>(loc, scalarPtr, scalarMask, scalarOther,
+                                       /*cache*/ triton::CacheModifier::NONE,
+                                       /*evict*/ triton::EvictionPolicy::NORMAL,
+                                       /*isVolatile*/ false);
+          b.create<tensor::YieldOp>(loc, scalar);
+        });
+    rewriter.replaceOp(op, tensorGenerate);
+  }
+};
+
 struct SplatToTensorConverter : public OpConversionPattern<triton::SplatOp> {
   using OpConversionPattern<triton::SplatOp>::OpConversionPattern;
   LogicalResult
@@ -85,10 +116,7 @@ struct AddPointerToTensorConverter
   using OpConversionPattern<triton::AddPtrOp>::OpConversionPattern;
   LogicalResult match(triton::AddPtrOp op) const override {
     // We only lift addition of tensors to tensors of addition.
-    if (isa<RankedTensorType>(op.getOperand(0).getType())) {
-      return success();
-    }
-    return failure();
+    return success(isa<RankedTensorType>(op.getOperand(0).getType()));
   }
   void rewrite(triton::AddPtrOp op, OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const override {
@@ -128,10 +156,7 @@ struct ElementwiseToTensorConverter : public OpConversionPattern<OpTy> {
   using OpConversionPattern<OpTy>::OpConversionPattern;
   LogicalResult match(OpTy op) const override {
     // We only lift elementwise ops.
-    if (isa<RankedTensorType>(op.getResult().getType())) {
-      return success();
-    }
-    return failure();
+    return success(isa<RankedTensorType>(op.getResult().getType()));
   }
   void rewrite(OpTy op, typename OpConversionPattern<OpTy>::OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const override {
@@ -172,6 +197,7 @@ public:
 
     RewritePatternSet patterns(&getContext());
     ConversionTarget target(getContext());
+
     target.addLegalDialect<tensor::TensorDialect>();
     auto isNotLiftedTensorOp = [](Operation *op) {
       if (op->getNumOperands() > 0 && op->getNumResults() == 1) {
@@ -183,13 +209,22 @@ public:
     target.addDynamicallyLegalDialect<arith::ArithDialect>(isNotLiftedTensorOp);
     target.addDynamicallyLegalDialect<math::MathDialect>(isNotLiftedTensorOp);
     target.addIllegalOp<triton::SplatOp, triton::MakeRangeOp>();
-    target.addDynamicallyLegalOp<triton::AddPtrOp>([&](triton::AddPtrOp op) {
+    target.addDynamicallyLegalOp<triton::AddPtrOp>([](triton::AddPtrOp op) {
       // Scalars.
       return !isa<RankedTensorType>(op.getOperand(0).getType());
     });
+
+    // We do not convert load/store ops, because they should be left to later
+    // passes, where we determine which tensors to materialize.
+    // target.addDynamicallyLegalOp<triton::LoadOp>([](triton::LoadOp op) {
+    //   return !isa<RankedTensorType>(op.getPtr().getType());
+    // });
+    // patterns.add<LoadToTensorConverter>(patterns.getContext());
+
     patterns.add<SplatToTensorConverter>(patterns.getContext());
     patterns.add<MakeRangeToTensorConverter>(patterns.getContext());
     patterns.add<AddPointerToTensorConverter>(patterns.getContext());
+    // TODO: ExpandDimsOp.
     // TODO: BroadcastOp.
     using LiftedElementwiseOps = std::tuple<
         arith::AddFOp, arith::AddIOp, arith::AndIOp, arith::CeilDivSIOp,
@@ -205,6 +240,7 @@ public:
         math::SqrtOp, math::TanOp>;
     addElementwiseToTensorConverter(
         patterns, static_cast<LiftedElementwiseOps *>(nullptr));
+
     if (failed(applyPartialConversion(funcOp, target, std::move(patterns)))) {
       funcOp.emitError("Error lowering to tensor idioms");
       return signalPassFailure();

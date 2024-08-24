@@ -8,6 +8,9 @@ def ConvertToTVMScript : Pass<"convert-to-tvmscript", "::mlir::ModuleOp"> {
   let summary = "Convert TVM dialect to TVMScript";
 
   let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::func::FuncDialect",
     "::mlir::scf::SCFDialect",
     "::mlir::tvm::TVMDialect",
   ];

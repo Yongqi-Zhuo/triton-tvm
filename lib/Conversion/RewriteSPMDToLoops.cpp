@@ -80,8 +80,8 @@ class RewriteSPMDToLoopsPass
 public:
   using RewriteSPMDToLoopsBase::RewriteSPMDToLoopsBase;
 
-  scf::ForOp wrapInForLoop(Region &region, int staticExtent,
-                           StringAttr thread) {
+  static scf::ForOp wrapInForLoop(Region &region, int staticExtent,
+                                  StringAttr thread) {
     assert(region.hasOneBlock() && "expected region to have one block");
     // First add a for loop to it.
     Block &entryBlock = region.front();
@@ -119,14 +119,6 @@ public:
     const SmallVector<int> gridDim(this->gridDim.begin(), this->gridDim.end());
 
     auto funcOp = cast<triton::FuncOp>(getOperation());
-
-    // Check that tt.return has no arguments.
-    funcOp.walk([&](triton::ReturnOp returnOp) {
-      if (returnOp.getNumOperands() > 0) {
-        returnOp.emitError("tt.return with operands not supported");
-        return signalPassFailure();
-      }
-    });
 
     OpBuilder builder(funcOp);
     SmallVector<Value> inductionVars;

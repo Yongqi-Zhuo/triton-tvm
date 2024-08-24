@@ -115,7 +115,7 @@ public:
     printer.writeLn("@tvm.script.ir_module");
     printer.writeLn("class Module:");
     printer.indent([&] {
-      for (auto funcOp : moduleOp.getOps<tvm::FuncOp>()) {
+      for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
         printer.writeLn("@T.prim_func");
         printer.write("def {}", funcOp.getName().str());
         printer.parens([&] {
@@ -127,7 +127,7 @@ public:
         });
         printer.writeLn(":");
         printer.indent([&] {
-          printer.writeLn(R"code(T.func_attr({"tir.noalias": True}))code");
+          printer.writeLn(R"code(T.func_attr({{"tir.noalias": True}}))code");
           if (!funcOp.getBody().hasOneBlock()) {
             funcOp.emitError("expected function to have a single block");
             return signalPassFailure();
