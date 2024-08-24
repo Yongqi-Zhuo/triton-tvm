@@ -9,7 +9,7 @@
 namespace py = pybind11;
 
 void init_triton_tvm_passes_ttgpuir(py::module &&m) {
-  m.def("add_convert_to_tvm", [](mlir ::PassManager &pm, std::vector<int> val0,
+  m.def("add_convert_to_tvm", [](mlir::PassManager &pm, std::vector<int> val0,
                                  std::vector<std::vector<int>> val1,
                                  std::vector<std::vector<int>> val2) {
     llvm::SmallVector<int> gridDim(val0.begin(), val0.end());
@@ -21,7 +21,7 @@ void init_triton_tvm_passes_ttgpuir(py::module &&m) {
     for (auto &v : val2) {
       tensorStrides.emplace_back(llvm::SmallVector<int>(v.begin(), v.end()));
     }
-    pm.addPass(mlir ::triton ::gpu ::createConvertTritonGPUToTVMPass(
+    pm.addPass(mlir::triton::createConvertTritonGPUToTVMPass(
         gridDim, tensorShapes, tensorStrides));
   });
 }

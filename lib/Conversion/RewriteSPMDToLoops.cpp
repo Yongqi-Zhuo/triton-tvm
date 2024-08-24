@@ -18,7 +18,7 @@
 
 using namespace mlir;
 
-namespace mlir::triton::gpu {
+namespace mlir::triton {
 
 #define GEN_PASS_DEF_REWRITESPMDTOLOOPS
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
@@ -149,6 +149,7 @@ public:
     // Replace tt.get_program_id with for iterators.
     RewritePatternSet patterns(&getContext());
     ConversionTarget target(getContext());
+    target.addIllegalOp<triton::GetProgramIdOp, triton::GetNumProgramsOp>();
     patterns.add<GetProgramIDConverter>(patterns.getContext(), inductionVars);
     patterns.add<GetNumProgramsConverter>(patterns.getContext(), gridDim);
     if (failed(applyPartialConversion(funcOp, target, std::move(patterns)))) {
@@ -158,4 +159,4 @@ public:
   }
 };
 
-} // namespace mlir::triton::gpu
+} // namespace mlir::triton

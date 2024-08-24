@@ -6,9 +6,7 @@
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
-namespace mlir {
-namespace triton {
-namespace gpu {
+namespace mlir::triton {
 
 std::unique_ptr<OperationPass<ModuleOp>>
 createConvertTritonGPUToTVMPass(SmallVector<int> gridDim,
@@ -18,8 +16,6 @@ createConvertTritonGPUToTVMPass(SmallVector<int> gridDim,
 #define GEN_PASS_DECL
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
 
-} // namespace gpu
-} // namespace triton
-} // namespace mlir
+} // namespace mlir::triton
 
 #endif

@@ -1,4 +1,5 @@
 add_triton_library(TritonGPUToTVM
+  LowerToTensorIdioms.cpp
   RewriteSPMDToLoops.cpp
   TritonGPUToTVM.cpp
 

@@ -25,7 +25,7 @@ struct StolenDims {
   SmallVector<SmallVector<int>> tensorStrides;
 };
 
-namespace mlir::triton::gpu {
+namespace mlir::triton {
 
 #define GEN_PASS_DEF_TRITONGPUTOTVM
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h.inc"
@@ -84,6 +84,7 @@ public:
 
       PassManager pm(&getContext(), func.getOperationName());
       pm.addPass(createRewriteSPMDToLoops({gridDim}));
+      pm.addPass(createLowerToTensorIdioms());
       if (failed(runPipeline(pm, func))) {
         signalPassFailure();
       }
@@ -191,8 +192,11 @@ public:
       // func.erase();
     });
 
-    // TODO: move this to Python.
     PassManager pm(&getContext(), moduleOp.getOperationName());
+    pm.addPass(createCanonicalizerPass());
+    pm.addPass(createCSEPass());
+    pm.addPass(createLoopInvariantCodeMotionPass());
+    // TODO: move this to Python.
     pm.addPass(tvm::createConvertToTVMScript({"output.py"}));
     if (failed(runPipeline(pm, moduleOp))) {
       signalPassFailure();
@@ -210,4 +214,4 @@ createConvertTritonGPUToTVMPass(SmallVector<int> gridDim,
                  .tensorStrides = std::move(tensorStrides)});
 }
 
-} // namespace mlir::triton::gpu
+} // namespace mlir::triton

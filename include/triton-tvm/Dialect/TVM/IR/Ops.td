@@ -85,7 +85,9 @@ def ReturnOp : TVM_Op<"return", [Pure, HasParent<"FuncOp">,
 
 }
 
-def TVM_VarOp : TVM_Op<"var", [NoMemoryEffect]> {
+def TVM_VarOp : TVM_Op<"var", [
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+]> {
 
   let summary = "Equivalent to T.var() in TVM TensorIR.";
 
@@ -106,7 +108,10 @@ def TVM_VarOp : TVM_Op<"var", [NoMemoryEffect]> {
 
 }
 
-def TVM_MatchBufferOp : TVM_Op<"match_buffer", [NoMemoryEffect]> {
+def TVM_MatchBufferOp : TVM_Op<"match_buffer", [
+  MemoryEffects<[MemRead<DefaultResource>]>,
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+]> {
 
   let summary = "Equivalent to T.match_buffer in TVM TensorIR.";
 
