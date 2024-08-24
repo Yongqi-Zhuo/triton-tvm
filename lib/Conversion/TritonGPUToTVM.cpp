@@ -13,6 +13,7 @@
 
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
+#include "triton-tvm/Dialect/TVM/Transforms/Passes.h"
 
 #define DEBUG_TYPE "tritongpu-to-tvm"
 
@@ -189,6 +190,13 @@ public:
 
       // func.erase();
     });
+
+    // TODO: move this to Python.
+    PassManager pm(&getContext(), moduleOp.getOperationName());
+    pm.addPass(tvm::createConvertToTVMScript({"output.py"}));
+    if (failed(runPipeline(pm, moduleOp))) {
+      signalPassFailure();
+    }
   }
 };
 

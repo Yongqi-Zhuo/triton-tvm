@@ -1,10 +1,8 @@
-add_triton_library(TritonGPUToTVM
-  RewriteSPMDToLoops.cpp
-  TritonGPUToTVM.cpp
+add_triton_library(TVMTransforms
+  ConvertToTVMScript.cpp
 
   DEPENDS
   TVMTableGen
-  TritonGPUToTVMConversionPassIncGen
   TVMPassIncGen
 
   LINK_LIBS PUBLIC
@@ -16,8 +14,4 @@ add_triton_library(TritonGPUToTVM
   MLIRTensorDialect
   MLIRTransforms
   MLIRSupport
-  TritonIR
-  TritonTransforms
-  TVMIR
-  TVMTransforms
 )
