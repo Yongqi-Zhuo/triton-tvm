@@ -1,5 +1,6 @@
 add_triton_library(TritonGPUToTVM
   LowerToTensorIdioms.cpp
+  MaterializeTensorsToTVMBuffers.cpp
   ReplaceTritonPointersWithMemRefs.cpp
   RewriteSPMDToLoops.cpp
   TritonGPUToTVM.cpp

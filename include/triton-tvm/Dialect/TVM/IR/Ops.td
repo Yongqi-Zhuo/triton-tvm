@@ -154,7 +154,12 @@ def TVM_WhereOp : TVM_Op<"where", [
 
 }
 
-def TVM_AxisOp : TVM_Op<"axis", [Pure, SameOperandsAndResultType]> {
+def TVM_AxisOp : TVM_Op<"axis", [
+  // So that this does not get moved around.
+  MemoryEffects<[MemRead<DefaultResource>]>,
+  MemoryEffects<[MemWrite<DefaultResource>]>,
+  SameOperandsAndResultType,
+]> {
 
   let summary = "Equivalent to T.axis in TVM TensorIR.";
 

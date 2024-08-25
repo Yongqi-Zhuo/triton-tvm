@@ -48,6 +48,23 @@ def ReplaceTritonPointersWithMemRefs : Pass<"replace-triton-pointers-with-memref
 
 }
 
+// TODO: Add rewrite rules to simplify patterns such as mod(add(x * c, y), c) => mod(y, c) when c is a constant.
+
+def MaterializeTensorsToTVMBuffers : Pass<"materialize-tensors-to-tvm-buffers", "::mlir::ModuleOp"> {
+
+  let summary = "Materialize tensors, allocating buffers for them.";
+
+  let dependentDialects = [
+    "::mlir::arith::ArithDialect",
+    "::mlir::bufferization::BufferizationDialect",
+    "::mlir::memref::MemRefDialect",
+    "::mlir::tensor::TensorDialect",
+    "::mlir::triton::TritonDialect",
+    "::mlir::tvm::TVMDialect",
+  ];
+
+}
+
 def TritonGPUToTVM : Pass<"convert-tritongpu-to-tvm", "::mlir::ModuleOp"> {
 
   let summary = "Convert TritonGPU to TVM dialect";
@@ -56,6 +73,7 @@ def TritonGPUToTVM : Pass<"convert-tritongpu-to-tvm", "::mlir::ModuleOp"> {
 
   let dependentDialects = [
     "::mlir::arith::ArithDialect",
+    "::mlir::bufferization::BufferizationDialect",
     "::mlir::func::FuncDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::scf::SCFDialect",

@@ -112,15 +112,21 @@ public:
   }
 
   void runOnOperation() override {
+    auto funcOp = cast<triton::FuncOp>(getOperation());
+    OpBuilder builder(funcOp);
+
+    // For simplicity we annotate the existing for-loops here.
+    funcOp.walk([&](scf::ForOp op) {
+      op->setAttr(tvm::kAttrForKindName,
+                  builder.getAttr<tvm::ForKindAttr>(tvm::ForKind::SERIAL));
+    });
+
     if (this->gridDim.empty()) {
       // No grid.
       return;
     }
     const SmallVector<int> gridDim(this->gridDim.begin(), this->gridDim.end());
 
-    auto funcOp = cast<triton::FuncOp>(getOperation());
-
-    OpBuilder builder(funcOp);
     SmallVector<Value> inductionVars;
 
     // Add the loops.

@@ -1,4 +1,5 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributes.h"
@@ -128,6 +129,7 @@ public:
     pm.addPass(createCanonicalizerPass());
     pm.addPass(
         createReplaceTritonPointersWithMemRefs(tensorShapes, tensorStrides));
+    pm.addPass(createMaterializeTensorsToTVMBuffers());
     pm.addPass(createCanonicalizerPass());
     pm.addPass(createCSEPass());
     pm.addPass(createLoopInvariantCodeMotionPass());
