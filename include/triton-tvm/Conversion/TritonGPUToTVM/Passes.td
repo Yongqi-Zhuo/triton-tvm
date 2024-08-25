@@ -35,7 +35,7 @@ def RewriteSPMDToLoops : Pass<"rewrite-spmd-to-loops", "::mlir::triton::FuncOp">
 
 def ReplaceTritonPointersWithMemRefs : Pass<"replace-triton-pointers-with-memrefs", "::mlir::ModuleOp"> {
 
-  let summary = "Eliminate Triton pointers, replacing them with memrefs. Require canonicalization passes to be run first, so that tt.addptr can be folded.";
+  let summary = "Eliminate Triton pointers, replacing them with memrefs. Require canonicalization passes to be run first, so that tt.addptr can be folded. This eliminates all tt.addptr operations.";
 
   let constructor = "::mlir::triton::createReplaceTritonPointersWithMemRefs()";
 

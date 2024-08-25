@@ -137,25 +137,23 @@ struct FuncArgToMemRefConverter : public OpConversionPattern<func::FuncOp> {
 struct UseMemRefInAddPtrConverter
     : public OpConversionPattern<triton::AddPtrOp> {
   using OpConversionPattern<triton::AddPtrOp>::OpConversionPattern;
-  static bool hasUsedMemRefToPtrOp(triton::AddPtrOp op) {
-    return op.getPtr().getDefiningOp<ttm::MemRefToPtrOp>() != nullptr;
-  }
   LogicalResult
   matchAndRewrite(triton::AddPtrOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    if (hasUsedMemRefToPtrOp(op)) {
-      // Already converted.
-      return failure();
-    }
-    auto ptr = adaptor.getPtr();
-    if (!isa<MemRefType>(ptr.getType())) {
+    auto memref = adaptor.getPtr();
+    auto memrefType = dyn_cast<MemRefType>(memref.getType());
+    if (!memrefType) {
       // We have not applied the conversion pattern to the function arguments.
       return failure();
     }
     // Here, the function argument is already converted to a memref<*x?>.
-    // Use ttm.memref_to_ptr %memref[%offset] to perform 1-D indexing.
+    // Use ttm.memref_to_ptr %memref[%offset0, %offset1, ...] to perform
+    // indexing. To do this, we delinearize the offset.
+    auto indices = tvm::utils::delinearizeIndex(
+        rewriter, op->getLoc(), adaptor.getOffset(),
+        cast<StridedLayoutAttr>(memrefType.getLayout()).getStrides());
     auto newPtr = rewriter.create<ttm::MemRefToPtrOp>(
-        op.getLoc(), op.getType(), ptr, ValueRange{adaptor.getOffset()});
+        op.getLoc(), op.getType(), memref, ValueRange(indices));
     rewriter.replaceOp(op, newPtr);
     return success();
   }
@@ -216,9 +214,8 @@ public:
     RewritePatternSet patterns(&getContext());
     ConversionTarget target(getContext());
 
-    target.addLegalDialect<ttm::TritonMemRefDialect>();
-    target.addDynamicallyLegalOp<triton::AddPtrOp>(
-        UseMemRefInAddPtrConverter::hasUsedMemRefToPtrOp);
+    target.addLegalDialect<arith::ArithDialect, ttm::TritonMemRefDialect>();
+    target.addIllegalOp<triton::AddPtrOp>();
     patterns.add<UseMemRefInAddPtrConverter>(patterns.getContext());
 
     target.addDynamicallyLegalOp<func::FuncOp>([](func::FuncOp op) {
