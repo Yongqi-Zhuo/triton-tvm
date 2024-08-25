@@ -1,12 +1,9 @@
-#include "mlir/Interfaces/FunctionImplementation.h"
-
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
-
-using namespace mlir;
-using namespace tvm;
 
 #define GET_OP_CLASSES
 #include "triton-tvm/Dialect/TVM/IR/Ops.cpp.inc"
+
+namespace mlir::tvm {
 
 void MatchBufferOp::build(OpBuilder &b, OperationState &result,
                           MemRefType resultType, Value source,
@@ -41,3 +38,5 @@ void InitOp::build(OpBuilder &builder, OperationState &result,
     bodyBuilder(builder, result.location);
   }
 }
+
+} // namespace mlir::tvm

@@ -1,7 +1,6 @@
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 
-using namespace mlir;
-using namespace mlir::tvm;
+namespace mlir::tvm {
 
 void TVMDialect::initialize() {
   addOperations<
@@ -13,5 +12,7 @@ void TVMDialect::initialize() {
 #include "triton-tvm/Dialect/TVM/IR/Types.cpp.inc"
       >();
 }
+
+} // namespace mlir::tvm
 
 #include "triton-tvm/Dialect/TVM/IR/Dialect.cpp.inc"

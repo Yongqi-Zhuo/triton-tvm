@@ -43,6 +43,7 @@ def ReplaceTritonPointersWithMemRefs : Pass<"replace-triton-pointers-with-memref
     "::mlir::arith::ArithDialect",
     "::mlir::memref::MemRefDialect",
     "::mlir::triton::TritonDialect",
+    "::mlir::ttm::TritonMemRefDialect",
   ];
 
 }
@@ -59,6 +60,7 @@ def TritonGPUToTVM : Pass<"convert-tritongpu-to-tvm", "::mlir::ModuleOp"> {
     "::mlir::memref::MemRefDialect",
     "::mlir::scf::SCFDialect",
     "::mlir::triton::gpu::TritonGPUDialect",
+    "::mlir::ttm::TritonMemRefDialect",
     "::mlir::tvm::TVMDialect",
   ];
 

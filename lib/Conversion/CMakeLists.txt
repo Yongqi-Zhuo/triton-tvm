@@ -5,6 +5,7 @@ add_triton_library(TritonGPUToTVM
   TritonGPUToTVM.cpp
 
   DEPENDS
+  TritonMemRefTableGen
   TVMTableGen
   TritonGPUToTVMConversionPassIncGen
   TVMPassIncGen
@@ -20,6 +21,7 @@ add_triton_library(TritonGPUToTVM
   MLIRSupport
   TritonIR
   TritonTransforms
+  TritonMemRef
   TVMIR
   TVMTransforms
 )

@@ -15,8 +15,6 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
-#include "mlir/IR/Dialect.h"
-
 namespace mlir::tvm {
 
 constexpr inline char kAttrForKindName[] = "tvm.for_kind";

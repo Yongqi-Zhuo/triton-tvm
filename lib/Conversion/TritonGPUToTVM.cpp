@@ -14,6 +14,7 @@
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 #include "triton-tvm/Dialect/TVM/Transforms/Passes.h"
+#include "triton-tvm/Dialect/TritonMemRef/TritonMemRef.h"
 
 #define DEBUG_TYPE "tritongpu-to-tvm"
 

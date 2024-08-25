@@ -31,37 +31,6 @@ namespace mlir::triton {
 
 namespace {
 
-struct LoadToTensorConverter : public OpConversionPattern<triton::LoadOp> {
-  using OpConversionPattern<triton::LoadOp>::OpConversionPattern;
-  LogicalResult match(triton::LoadOp op) const override {
-    return success(isa<RankedTensorType>(op.getPtr().getType()));
-  }
-  void rewrite(triton::LoadOp op, OpAdaptor adaptor,
-               ConversionPatternRewriter &rewriter) const override {
-    auto type = cast<RankedTensorType>(op.getResult().getType());
-    auto tensorGenerate = rewriter.create<tensor::GenerateOp>(
-        op.getLoc(), type,
-        // All static dimensions
-        ValueRange{}, [&](OpBuilder &b, Location loc, ValueRange args) {
-          Value ptr = adaptor.getPtr();
-          Value mask = adaptor.getMask();
-          Value other = adaptor.getOther();
-          Value scalarPtr = b.create<tensor::ExtractOp>(loc, ptr, args);
-          Value scalarMask = b.create<tensor::ExtractOp>(loc, mask, args);
-          Value scalarOther = b.create<tensor::ExtractOp>(loc, other, args);
-          // TODO: Support block pointers.
-          // TODO: Support cache modifiers and eviction policies.
-          Value scalar =
-              b.create<triton::LoadOp>(loc, scalarPtr, scalarMask, scalarOther,
-                                       /*cache*/ triton::CacheModifier::NONE,
-                                       /*evict*/ triton::EvictionPolicy::NORMAL,
-                                       /*isVolatile*/ false);
-          b.create<tensor::YieldOp>(loc, scalar);
-        });
-    rewriter.replaceOp(op, tensorGenerate);
-  }
-};
-
 struct SplatToTensorConverter : public OpConversionPattern<triton::SplatOp> {
   using OpConversionPattern<triton::SplatOp>::OpConversionPattern;
   LogicalResult
@@ -216,10 +185,6 @@ public:
 
     // We do not convert load/store ops, because they should be left to later
     // passes, where we determine which tensors to materialize.
-    // target.addDynamicallyLegalOp<triton::LoadOp>([](triton::LoadOp op) {
-    //   return !isa<RankedTensorType>(op.getPtr().getType());
-    // });
-    // patterns.add<LoadToTensorConverter>(patterns.getContext());
 
     patterns.add<SplatToTensorConverter>(patterns.getContext());
     patterns.add<MakeRangeToTensorConverter>(patterns.getContext());
