@@ -31,6 +31,48 @@ namespace mlir::triton {
 
 namespace {
 
+struct ArithConstSplatToTensorConverter
+    : public OpConversionPattern<arith::ConstantOp> {
+  using OpConversionPattern<arith::ConstantOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(arith::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto type = dyn_cast<RankedTensorType>(op.getType());
+    if (!type)
+      return failure();
+    Value src;
+    if (auto denseAttr = dyn_cast<DenseFPElementsAttr>(op.getValueAttr())) {
+      if (denseAttr.isSplat()) {
+        src = rewriter.create<arith::ConstantOp>(
+            op.getLoc(),
+            rewriter.getFloatAttr(type.getElementType(),
+                                  denseAttr.getSplatValue<APFloat>()));
+      }
+    } else if (auto denseAttr =
+                   dyn_cast<DenseIntElementsAttr>(op.getValueAttr())) {
+      if (denseAttr.isSplat()) {
+        src = rewriter.create<arith::ConstantOp>(
+            op.getLoc(),
+            rewriter.getIntegerAttr(type.getElementType(),
+                                    denseAttr.getSplatValue<APInt>()));
+      }
+    }
+    if (!src)
+      return failure();
+    auto tensorGenerate = rewriter.create<tensor::GenerateOp>(
+        op.getLoc(), type,
+        // All static dimensions
+        ValueRange{},
+        // Just emit the value
+        [&](OpBuilder &b, Location loc, ValueRange args) {
+          b.create<tensor::YieldOp>(loc, src);
+        });
+    tensorGenerate->setDiscardableAttrs(op->getDiscardableAttrDictionary());
+    rewriter.replaceOp(op, tensorGenerate);
+    return success();
+  }
+};
+
 struct SplatToTensorConverter : public OpConversionPattern<triton::SplatOp> {
   using OpConversionPattern<triton::SplatOp>::OpConversionPattern;
   LogicalResult
@@ -169,7 +211,7 @@ public:
 
     target.addLegalDialect<tensor::TensorDialect>();
     auto isNotLiftedTensorOp = [](Operation *op) {
-      if (op->getNumOperands() > 0 && op->getNumResults() == 1) {
+      if (op->getNumResults() == 1) {
         auto resultType = op->getResult(0).getType();
         return !isa<RankedTensorType>(resultType);
       }
@@ -186,6 +228,7 @@ public:
     // We do not convert load/store ops, because they should be left to later
     // passes, where we determine which tensors to materialize.
 
+    patterns.add<ArithConstSplatToTensorConverter>(patterns.getContext());
     patterns.add<SplatToTensorConverter>(patterns.getContext());
     patterns.add<MakeRangeToTensorConverter>(patterns.getContext());
     patterns.add<AddPointerToTensorConverter>(patterns.getContext());
