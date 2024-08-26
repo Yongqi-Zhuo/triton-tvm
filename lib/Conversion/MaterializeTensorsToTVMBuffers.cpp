@@ -9,8 +9,10 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
+#include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/Support/Debug.h"
 
 #include "triton/Dialect/Triton/IR/Dialect.h"
@@ -183,36 +185,135 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
   return LoopNest{std::move(loops), std::move(tensorIndices)};
 }
 
+// Traverse the loop nest and collect.
+SmallVector<scf::ForOp> collectLoopsInScope(OpBuilder &b) {
+  SmallVector<scf::ForOp> loops;
+  auto *block = b.getBlock();
+  while (block) {
+    auto *parentOp = block->getParentOp();
+    if (!parentOp)
+      break;
+    if (llvm::TypeSwitch<Operation *, bool>(parentOp)
+            .Case([&](scf::ForOp forOp) {
+              loops.push_back(forOp);
+              return true;
+            })
+            .Case([&](func::FuncOp) { return false; })
+            .Default([&](Operation *) { return true; })) {
+      block = parentOp->getBlock();
+    } else {
+      break;
+    }
+  }
+  std::reverse(loops.begin(), loops.end());
+  return loops;
+}
+
+SmallVector<Value>
+getInductionVarsFromLoopNest(SmallVectorImpl<scf::ForOp> &loops) {
+  SmallVector<Value> inductionVars;
+  for (auto loop : loops) {
+    inductionVars.push_back(loop.getInductionVar());
+  }
+  return inductionVars;
+}
+
+SmallVector<tvm::AxisOp> mapVarsToSpatialAxes(OpBuilder &b, ValueRange vars) {
+  SmallVector<tvm::AxisOp> axes;
+  for (Value var : vars) {
+    axes.push_back(b.create<tvm::AxisOp>(
+        var.getLoc(), b.getAttr<tvm::AxisKindAttr>(tvm::AxisKind::SPATIAL),
+        var));
+  }
+  return axes;
+}
+
+// Returns true if the op is cloned.
+bool inlineRecursivelyImpl(OpBuilder &b, Value value, IRMapping &mapper) {
+  if (auto newValue = mapper.lookupOrNull(value)) {
+    // Already visited. Reuse the result.
+    return newValue != value;
+  }
+  // Have not visited. Try inlining.
+  auto *op = value.getDefiningOp();
+  if (!op) {
+    // This is a block argument that needs not to be rewritten.
+    // (Because previous lookup returned nullptr.)
+    return false;
+  }
+  bool needsCloning = false;
+  for (Value operand : op->getOperands()) {
+    needsCloning |= inlineRecursivelyImpl(b, operand, mapper);
+  }
+  if (needsCloning) {
+    // At least one of the operands was rewritten. Clone the op.
+    // The results are implicitly mapped.
+    op = b.cloneWithoutRegions(*op, mapper);
+    return true;
+  }
+  // No need to clone. Just update the mapping.
+  mapper.map(op->getResults(), op->getResults());
+  return false;
+}
+
+// Return yielded value.
+SmallVector<Value> inlineRecursively(OpBuilder &b, Block &block,
+                                     IRMapping &mapper) {
+  auto *terminator = block.getTerminator();
+  assert(terminator->hasTrait<OpTrait::ReturnLike>());
+  SmallVector<Value> results;
+  for (Value operand : terminator->getOperands()) {
+    inlineRecursivelyImpl(b, operand, mapper);
+    results.push_back(mapper.lookup(operand));
+  }
+  return results;
+}
+
+void materializeGenerateOp(OpBuilder &b, tensor::GenerateOp tensor) {
+  auto tensorType = tensor.getType();
+  // 1. Allocate buffer (and apply bufferization.to_tensor later).
+  auto buffer = b.create<tvm::AllocBufferOp>(
+      tensor.getLoc(),
+      MemRefType::get(tensorType.getShape(), tensorType.getElementType()),
+      b.getStringAttr("shared"));
+
+  // 2. Get into the loop nest and create tvm.block.
+  {
+    OpBuilder::InsertionGuard guard(b);
+    auto outerLoopNest = collectLoopsInScope(b);
+    auto outerLoopVars = getInductionVarsFromLoopNest(outerLoopNest);
+    auto innerLoopNest = generateLoopNest(b, tensor.getLoc(), tensorType);
+    innerLoopNest.setInsertingToInnermost(b);
+    b.create<tvm::BlockOp>(tensor.getLoc(), [&](OpBuilder &b, Location loc) {
+      // 3. Map every induction var to tvm.axis.
+      // Now we pretend there are only parallel dims. TODO: support reduction
+      // dims.
+      auto outerLoopAxes = mapVarsToSpatialAxes(b, outerLoopVars);
+      // We can consolidate multiple inner loops into one induction variable.
+      auto innerLoopAxes = mapVarsToSpatialAxes(b, innerLoopNest.tensorIndices);
+
+      // 4. Copy tensor.generate contents.
+      // The algorithm is simple: recursively visit operands of Ops, upon
+      // induction variable, replace with axes. Otherwise, return the original
+      // Value.
+      IRMapping mapper;
+      mapper.map(outerLoopVars, outerLoopAxes);
+      mapper.map(tensor.getBody().getArguments(), innerLoopAxes);
+      inlineRecursively(b, tensor.getBody().front(), mapper);
+    });
+  }
+
+  // Do not forget to apply bufferization.to_tensor.
+  auto unbufferized = b.create<bufferization::ToTensorOp>(
+      tensor.getLoc(), buffer, b.getUnitAttr());
+  tensor->replaceAllUsesWith(unbufferized->getResults());
+}
+
 } // namespace
 
 class MaterializeTensorsToTVMBuffers
     : public impl::MaterializeTensorsToTVMBuffersBase<
           MaterializeTensorsToTVMBuffers> {
-
-  void materialize(OpBuilder &b, tensor::GenerateOp tensor) {
-    auto tensorType = tensor.getType();
-    // 1. Allocate buffer (and apply bufferization.to_tensor later).
-    auto buffer = b.create<tvm::AllocBufferOp>(
-        tensor.getLoc(),
-        MemRefType::get(tensorType.getShape(), tensorType.getElementType()),
-        b.getStringAttr("shared"));
-
-    // 2. Get into the loop nest and create tvm.block.
-    {
-      OpBuilder::InsertionGuard guard(b);
-      auto loopNest = generateLoopNest(b, tensor.getLoc(), tensorType);
-      loopNest.setInsertingToInnermost(b);
-      b.create<tvm::BlockOp>(tensor.getLoc(), [&](OpBuilder &b, Location loc) {
-        // TODO: map every induction var to tvm.axis, and copy tensor.generate
-        // contents.
-      });
-    }
-
-    // Do not forget to apply bufferization.to_tensor.
-    auto unbufferized = b.create<bufferization::ToTensorOp>(
-        tensor.getLoc(), buffer, b.getUnitAttr());
-    tensor->replaceAllUsesWith(unbufferized->getResults());
-  }
 
 public:
   using MaterializeTensorsToTVMBuffersBase::MaterializeTensorsToTVMBuffersBase;
@@ -226,23 +327,23 @@ public:
     // - tvm.if_then_else for load guard.
     // - tvm.where for store guard.
     // In this pass, we materialize tensors. So, we need to
-    // - Create tvm.alloc_buffer for writing, and bufferization.to_tensor so it
-    //   can still be read.
-    // - Create a loop nest and tvm.block, and copy contents of tensor.generate
-    //   region into it.
-    // - Use IRMapping to map every induction var to tvm.axis, also modifying
-    //   all the address computing ops.
-    // - tvm.write the tensor.
-    // - For each kind of materialization,
-    //   - tt.load & tt.store. Extract from ttm.memref_to_ptr memref and
-    //     indices. Use tvm.if_then_else and tvm.where for guards.
-    //   - tt.reduce. Note that we have to use tvm.axis reduction and tvm.init.
-    //   - tt.dot. Also tvm.axis reduction. Note that there may be scalar
-    //     output, so we have to also convert that to a tensor.
-    //   - Others. All tensor.generate. Note that we can reject materializing
-    //     pointer tensors for the time being, because we choose not to support
-    //     indirection.
-    // - Then add tvm.read.
+    // 1. Create tvm.alloc_buffer for writing, and bufferization.to_tensor so it
+    //    can still be read.
+    // 2. Create a loop nest and tvm.block.
+    // 3. Bind axes with tvm.axis.
+    // 4. Copy contents of tensor.generate. Use IRMapping to map induction
+    //    vars to the axes, also modifying all the address computing ops.
+    // 5. tvm.write the tensor.
+    // 6. For each kind of materialization,
+    //    - tt.load & tt.store. Extract from ttm.memref_to_ptr memref and
+    //      indices. Use tvm.if_then_else and tvm.where for guards.
+    //    - tt.reduce. Note that we have to use tvm.axis reduction and tvm.init.
+    //    - tt.dot. Also tvm.axis reduction. Note that there may be scalar
+    //      output, so we have to also convert that to a tensor.
+    //    - Others. All tensor.generate. Note that we can reject materializing
+    //      pointer tensors for the time being, because we choose not to support
+    //      indirection.
+    // 7. Then add tvm.read for each tensor.extract.
   }
 };
 
