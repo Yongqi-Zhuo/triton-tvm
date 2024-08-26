@@ -291,10 +291,7 @@ SmallVector<Value, 1> inlineRecursively(OpBuilder &b, Block &block,
   return results;
 }
 
-// The first 3 steps are done for you. Now carry on.
-struct Materialization {
-  // Allocated buffer.
-  tvm::AllocBufferOp buffer;
+struct Computation {
   // The created computation block.
   tvm::BlockOp block;
   // The outer loop nest has already been mapped.
@@ -302,15 +299,40 @@ struct Materialization {
   // With tvm.axis applied.
   SmallVector<Value> innerLoopsAxes;
 
+  [[nodiscard]] OpBuilder::InsertionGuard enterBlock(OpBuilder &b) {
+    OpBuilder::InsertionGuard guard(b);
+    b.setInsertionPointToEnd(block.getBody());
+    return guard;
+  }
+
+  static SmallVector<Value> getArrayAsIndexType(OpBuilder &b,
+                                                ValueRange array) {
+    SmallVector<Value> arrayAsIndexType;
+    for (auto value : array) {
+      arrayAsIndexType.push_back(b.create<arith::IndexCastOp>(
+          value.getLoc(), b.getIndexType(), value));
+    }
+    return arrayAsIndexType;
+  }
+
   // Because we currently uses i32 as indices, we have to cast innerLoopsAxes to
   // index so that they can be used to inline the generator.
   SmallVector<Value> getInnerLoopsAxesAsIndexType(OpBuilder &b) const {
-    SmallVector<Value> innerLoopsAxesAsIndexType;
+    return getArrayAsIndexType(b, innerLoopsAxes);
+  }
+
+  // We simply return the indices wrapped in the axes. This can be used in
+  // tvm.where statements.
+  SmallVector<Value> getInnerLoopsIndices() const {
+    SmallVector<Value> indices;
     for (auto axis : innerLoopsAxes) {
-      innerLoopsAxesAsIndexType.push_back(
-          b.create<arith::IndexCastOp>(axis.getLoc(), b.getIndexType(), axis));
+      indices.push_back(axis.getDefiningOp<tvm::AxisOp>().getBinding());
     }
-    return innerLoopsAxesAsIndexType;
+    return indices;
+  }
+
+  SmallVector<Value> getInnerLoopsIndicesAsIndexType(OpBuilder &b) const {
+    return getArrayAsIndexType(b, getInnerLoopsIndices());
   }
 
   SmallVector<Value>
@@ -321,19 +343,21 @@ struct Materialization {
     return inlineRecursively(b, generator, mapper);
   }
 
-  tvm::RefOp getDest(OpBuilder &b, Location loc) {
+  tvm::RefOp getDest(OpBuilder &b, Location loc, tvm::AllocBufferOp buffer) {
     return b.create<tvm::RefOp>(loc, buffer, innerLoopsAxes);
   }
 };
 
-Materialization materializeTensor(OpBuilder &b, Location loc,
+tvm::AllocBufferOp allocateBuffer(OpBuilder &b, Location loc,
                                   RankedTensorType tensorType) {
-  Materialization result;
-
-  // 1. Allocate buffer (and apply bufferization.to_tensor later).
-  result.buffer = b.create<tvm::AllocBufferOp>(
+  return b.create<tvm::AllocBufferOp>(
       loc, MemRefType::get(tensorType.getShape(), tensorType.getElementType()),
       b.getStringAttr("shared"));
+}
+
+Computation computeTensor(OpBuilder &b, Location loc,
+                          RankedTensorType tensorType) {
+  Computation result;
 
   // 2. Get into the loop nest and create tvm.block.
   {
@@ -347,11 +371,11 @@ Materialization materializeTensor(OpBuilder &b, Location loc,
       // Now we pretend there are only parallel dims. TODO: support reduction
       // dims.
       auto outerLoopsAxes = mapVarsToSpatialAxes(
-          b, outerLoopVars, getExtentsFromLoopNest(outerLoopNest));
+          b, getExtentsFromLoopNest(outerLoopNest), outerLoopVars);
       // We can consolidate multiple inner loops into one induction variable.
       result.innerLoopsAxes =
-          mapVarsToSpatialAxes(b, innerLoopNest.tensorIndices,
-                               getExtentsFromLoopNest(innerLoopNest.loops));
+          mapVarsToSpatialAxes(b, getExtentsFromLoopNest(innerLoopNest.loops),
+                               innerLoopNest.tensorIndices);
       result.mapper.map(outerLoopVars, outerLoopsAxes);
     });
   }
@@ -363,22 +387,25 @@ Materialization materializeTensor(OpBuilder &b, Location loc,
 void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
   auto tensorType = tensor.getType();
   auto loc = tensor.getLoc();
-  auto materialization = materializeTensor(b, loc, tensorType);
-  auto &[buffer, block, mapper, innerLoopsAxes] = materialization;
+
+  // 1. Allocate buffer (and apply bufferization.to_tensor later).
+  auto buffer = allocateBuffer(b, loc, tensorType);
+
+  auto computation = computeTensor(b, loc, tensorType);
+  auto &[block, mapper, innerLoopsAxes] = computation;
 
   {
     // Enter the block.
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToEnd(block.getBody());
+    auto guard = computation.enterBlock(b);
     auto innerLoopsAxesAsIndexType =
-        materialization.getInnerLoopsAxesAsIndexType(b);
+        computation.getInnerLoopsAxesAsIndexType(b);
 
     // 4. Copy tensor.generate contents.
-    auto rhs = materialization.inlineGenerator(b, tensor,
-                                               innerLoopsAxesAsIndexType)[0];
+    auto rhs =
+        computation.inlineGenerator(b, tensor, innerLoopsAxesAsIndexType)[0];
 
     // 5. tvm.write and tvm.assign the tensor.
-    auto lhs = materialization.getDest(b, loc);
+    auto lhs = computation.getDest(b, loc, buffer);
     b.create<tvm::WriteOp>(loc, ValueRange{lhs});
     b.create<tvm::AssignOp>(loc, lhs, rhs);
   }
@@ -392,26 +419,29 @@ void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
 void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   auto tensorType = cast<RankedTensorType>(load.getType());
   auto loc = load.getLoc();
-  auto materialization = materializeTensor(b, loc, tensorType);
-  auto &[buffer, block, mapper, innerLoopsAxes] = materialization;
+
+  // 1. Allocate buffer (and apply bufferization.to_tensor later).
+  auto buffer = allocateBuffer(b, loc, tensorType);
+
+  auto computation = computeTensor(b, loc, tensorType);
+  auto &[block, mapper, innerLoopsAxes] = computation;
 
   {
     // Enter the block.
-    OpBuilder::InsertionGuard guard(b);
-    b.setInsertionPointToEnd(block.getBody());
+    auto guard = computation.enterBlock(b);
     auto innerLoopsAxesAsIndexType =
-        materialization.getInnerLoopsAxesAsIndexType(b);
+        computation.getInnerLoopsAxesAsIndexType(b);
 
     auto ptrGeneratorOp =
         cast<tensor::GenerateOp>(load.getPtr().getDefiningOp());
 
     // 4. Copy tensor.generate contents.
-    auto ptr = materialization.inlineGenerator(b, ptrGeneratorOp,
-                                               innerLoopsAxesAsIndexType)[0];
+    auto ptr = computation.inlineGenerator(b, ptrGeneratorOp,
+                                           innerLoopsAxesAsIndexType)[0];
 
     // In the previous pass, we have already eliminated pointer arithmetic. Now
     // we have a memref with indices.
-    auto rhsMemRefPtr = cast<ttm::MemRefToPtrOp>(ptr.getDefiningOp());
+    auto rhsMemRefPtr = ptr.getDefiningOp<ttm::MemRefToPtrOp>();
     Value rhs =
         b.create<tvm::RefOp>(rhsMemRefPtr->getLoc(), rhsMemRefPtr.getMemRef(),
                              rhsMemRefPtr.getIndices());
@@ -426,15 +456,15 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
           cast<tensor::GenerateOp>(load.getMask().getDefiningOp());
       auto otherGeneratorOp =
           cast<tensor::GenerateOp>(load.getOther().getDefiningOp());
-      auto mask = materialization.inlineGenerator(b, maskGeneratorOp,
-                                                  innerLoopsAxesAsIndexType)[0];
-      auto other = materialization.inlineGenerator(
-          b, otherGeneratorOp, innerLoopsAxesAsIndexType)[0];
+      auto mask = computation.inlineGenerator(b, maskGeneratorOp,
+                                              innerLoopsAxesAsIndexType)[0];
+      auto other = computation.inlineGenerator(b, otherGeneratorOp,
+                                               innerLoopsAxesAsIndexType)[0];
       rhs = b.create<tvm::IfThenElseOp>(loc, mask, rhs, other);
     }
 
     // 5. tvm.write and tvm.assign the tensor.
-    auto lhs = materialization.getDest(b, loc);
+    auto lhs = computation.getDest(b, loc, buffer);
     b.create<tvm::WriteOp>(loc, ValueRange{lhs});
     b.create<tvm::AssignOp>(loc, lhs, rhs);
   }
@@ -443,8 +473,66 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   auto unbufferized =
       b.create<bufferization::ToTensorOp>(loc, buffer, b.getUnitAttr());
   load->replaceAllUsesWith(unbufferized->getResults());
+
   // Remove the load.
   load->erase();
+}
+
+void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
+  auto tensorType = cast<RankedTensorType>(store.getPtr().getType());
+  auto loc = store.getLoc();
+
+  // 1. No need to allocate buffer, because we materialize into a destination
+  // parameter.
+
+  auto computation = computeTensor(b, loc, tensorType);
+  auto &[block, mapper, innerLoopsAxes] = computation;
+
+  {
+    // Enter the block.
+    auto guard = computation.enterBlock(b);
+    auto innerLoopsAxesAsIndexType =
+        computation.getInnerLoopsAxesAsIndexType(b);
+    auto innerLoopsIndicesAsIndexType =
+        computation.getInnerLoopsIndicesAsIndexType(b);
+
+    auto ptrGeneratorOp =
+        cast<tensor::GenerateOp>(store.getPtr().getDefiningOp());
+
+    // 4. Copy tensor.generate contents.
+    auto ptr = computation.inlineGenerator(b, ptrGeneratorOp,
+                                           innerLoopsAxesAsIndexType)[0];
+
+    // Similar to load, we have a memref
+    auto lhsMemRefPtr = ptr.getDefiningOp<ttm::MemRefToPtrOp>();
+    Value lhs =
+        b.create<tvm::RefOp>(lhsMemRefPtr->getLoc(), lhsMemRefPtr.getMemRef(),
+                             lhsMemRefPtr.getIndices());
+
+    // Add tvm.where on demand.
+    if (store.getMask()) {
+      auto maskGeneratorOp =
+          cast<tensor::GenerateOp>(store.getMask().getDefiningOp());
+      // Note that here is a bit different, because in tvm.where we do not use
+      // axes, but indices.
+      auto mask = computation.inlineGenerator(b, maskGeneratorOp,
+                                              innerLoopsIndicesAsIndexType)[0];
+      b.create<tvm::WhereOp>(loc, mask);
+    }
+
+    // Extract the value to be stored.
+    auto rhs = b.create<tensor::ExtractOp>(loc, store.getValue(),
+                                           innerLoopsAxesAsIndexType);
+
+    // 5. tvm.write and tvm.assign the tensor.
+    b.create<tvm::WriteOp>(loc, ValueRange{lhs});
+    b.create<tvm::AssignOp>(loc, lhs, rhs);
+  }
+
+  // 6. No need to bufferization.to_tensor.
+
+  // Remove the store.
+  store->erase();
 }
 
 } // namespace
@@ -477,7 +565,7 @@ public:
     // 6. Apply bufferization.to_tensor for each materialized tensor, because we
     //    still have tensor.extract.
     // 7. Then add tvm.read for each tensor.extract.
-    // ** For each kind of materialization,
+    // ** For each kind of computation,
     //    - tt.load & tt.store. Extract from ttm.memref_to_ptr memref and
     //      indices. Use tvm.if_then_else and tvm.where for guards.
     //    - tt.reduce. Note that we have to use tvm.axis reduction and tvm.init.
@@ -501,6 +589,11 @@ public:
       OpBuilder builder(&getContext());
       builder.setInsertionPointAfter(load);
       materializeLoadOp(builder, load);
+    });
+    moduleOp.walk([&](triton::StoreOp store) {
+      OpBuilder builder(&getContext());
+      builder.setInsertionPointAfter(store);
+      materializeStoreOp(builder, store);
     });
   }
 };
