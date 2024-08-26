@@ -10,6 +10,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/SideEffectInterfaces.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -218,12 +219,21 @@ getInductionVarsFromLoopNest(SmallVectorImpl<scf::ForOp> &loops) {
   return inductionVars;
 }
 
-SmallVector<tvm::AxisOp> mapVarsToSpatialAxes(OpBuilder &b, ValueRange vars) {
-  SmallVector<tvm::AxisOp> axes;
-  for (Value var : vars) {
+SmallVector<Value> getExtentsFromLoopNest(SmallVectorImpl<scf::ForOp> &loops) {
+  SmallVector<Value> extents;
+  for (auto loop : loops) {
+    extents.push_back(loop.getUpperBound());
+  }
+  return extents;
+}
+
+SmallVector<Value> mapVarsToSpatialAxes(OpBuilder &b, ValueRange extents,
+                                        ValueRange vars) {
+  SmallVector<Value> axes;
+  for (auto [extent, var] : llvm::zip(extents, vars)) {
     axes.push_back(b.create<tvm::AxisOp>(
         var.getLoc(), b.getAttr<tvm::AxisKindAttr>(tvm::AxisKind::SPATIAL),
-        var));
+        extent, var));
   }
   return axes;
 }
@@ -246,9 +256,13 @@ bool inlineRecursivelyImpl(OpBuilder &b, Value value, IRMapping &mapper) {
     needsCloning |= inlineRecursivelyImpl(b, operand, mapper);
   }
   if (needsCloning) {
-    // At least one of the operands was rewritten. Clone the op.
-    // The results are implicitly mapped.
+    // At least one of the oper.ands was rewritten. Clone the op.
+    // Check that the op is pure.
+    assert(isPure(op) && "expected pure op");
+    // Check that we are not cloning a region.
+    assert(op->getNumRegions() == 0 && "expected no regions");
     op = b.cloneWithoutRegions(*op, mapper);
+    // The results are implicitly mapped.
     return true;
   }
   // No need to clone. Just update the mapping.
@@ -257,11 +271,11 @@ bool inlineRecursivelyImpl(OpBuilder &b, Value value, IRMapping &mapper) {
 }
 
 // Return yielded value.
-SmallVector<Value> inlineRecursively(OpBuilder &b, Block &block,
-                                     IRMapping &mapper) {
+SmallVector<Value, 1> inlineRecursively(OpBuilder &b, Block &block,
+                                        IRMapping &mapper) {
   auto *terminator = block.getTerminator();
   assert(terminator->hasTrait<OpTrait::ReturnLike>());
-  SmallVector<Value> results;
+  SmallVector<Value, 1> results;
   for (Value operand : terminator->getOperands()) {
     inlineRecursivelyImpl(b, operand, mapper);
     results.push_back(mapper.lookup(operand));
@@ -288,9 +302,12 @@ void materializeGenerateOp(OpBuilder &b, tensor::GenerateOp tensor) {
       // 3. Map every induction var to tvm.axis.
       // Now we pretend there are only parallel dims. TODO: support reduction
       // dims.
-      auto outerLoopAxes = mapVarsToSpatialAxes(b, outerLoopVars);
+      auto outerLoopAxes = mapVarsToSpatialAxes(
+          b, outerLoopVars, getExtentsFromLoopNest(outerLoopNest));
       // We can consolidate multiple inner loops into one induction variable.
-      auto innerLoopAxes = mapVarsToSpatialAxes(b, innerLoopNest.tensorIndices);
+      auto innerLoopAxes =
+          mapVarsToSpatialAxes(b, innerLoopNest.tensorIndices,
+                               getExtentsFromLoopNest(innerLoopNest.loops));
 
       // 4. Copy tensor.generate contents.
       // The algorithm is simple: recursively visit operands of Ops, upon
@@ -298,8 +315,21 @@ void materializeGenerateOp(OpBuilder &b, tensor::GenerateOp tensor) {
       // Value.
       IRMapping mapper;
       mapper.map(outerLoopVars, outerLoopAxes);
-      mapper.map(tensor.getBody().getArguments(), innerLoopAxes);
-      inlineRecursively(b, tensor.getBody().front(), mapper);
+      Block &generator = tensor.getBody().front();
+      // Because we currently uses i32 as indices, we have to cast innerLoopAxes
+      // to index so that they can be used to inline the generator.
+      SmallVector<Value> innerLoopAxesAsIndexType;
+      for (auto axis : innerLoopAxes) {
+        innerLoopAxesAsIndexType.push_back(b.create<arith::IndexCastOp>(
+            axis.getLoc(), b.getIndexType(), axis));
+      }
+      mapper.map(generator.getArguments(), innerLoopAxesAsIndexType);
+      auto computedResult = inlineRecursively(b, generator, mapper);
+
+      // 5. tvm.write and tvm.assign the tensor.
+      auto lhs = b.create<tvm::RefOp>(tensor.getLoc(), buffer, innerLoopAxes);
+      b.create<tvm::WriteOp>(tensor.getLoc(), ValueRange{lhs});
+      b.create<tvm::AssignOp>(tensor.getLoc(), lhs, computedResult.front());
     });
   }
 
@@ -333,17 +363,27 @@ public:
     // 3. Bind axes with tvm.axis.
     // 4. Copy contents of tensor.generate. Use IRMapping to map induction
     //    vars to the axes, also modifying all the address computing ops.
-    // 5. tvm.write the tensor.
+    // 5. tvm.write and tvm.assign the tensor.
     // 6. For each kind of materialization,
     //    - tt.load & tt.store. Extract from ttm.memref_to_ptr memref and
     //      indices. Use tvm.if_then_else and tvm.where for guards.
     //    - tt.reduce. Note that we have to use tvm.axis reduction and tvm.init.
-    //    - tt.dot. Also tvm.axis reduction. Note that there may be scalar
-    //      output, so we have to also convert that to a tensor.
+    //      Note that there may be scalar output, so we have to also convert
+    //      that to a tensor.
+    //    - tt.dot. Also tvm.axis reduction.
     //    - Others. All tensor.generate. Note that we can reject materializing
     //      pointer tensors for the time being, because we choose not to support
     //      indirection.
     // 7. Then add tvm.read for each tensor.extract.
+    getOperation().walk([&](tensor::GenerateOp tensor) {
+      OpBuilder builder(&getContext());
+      builder.setInsertionPointAfter(tensor);
+      for (auto *user : tensor->getUsers()) {
+        if (isa<triton::LoadOp>(user) || isa<triton::StoreOp>(user))
+          return;
+      }
+      materializeGenerateOp(builder, tensor);
+    });
   }
 };
 

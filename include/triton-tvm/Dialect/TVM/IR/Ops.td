@@ -15,6 +15,7 @@ class TVM_Op<string mnemonic, list<Trait> traits = []>
     : Op<TVM_Dialect, mnemonic, traits>;
 
 def TVM_VarOp : TVM_Op<"var", [
+  MemoryEffects<[MemRead<DefaultResource>]>,
   MemoryEffects<[MemWrite<DefaultResource>]>,
 ]> {
 
@@ -168,16 +169,16 @@ def TVM_AxisOp : TVM_Op<"axis", [
 
     Example:
     ```mlir
-      %2 = tvm.axis spatial %0 : index
-      %3 = tvm.axis reduce %1 : index
+      %4 = tvm.axis spatial %2 = %0 : index
+      %5 = tvm.axis reduce %3 = %1 : index
     ```
   }];
 
-  let arguments = (ins TVM_AxisKind:$axis_kind, AnyInteger:$binding);
+  let arguments = (ins TVM_AxisKind:$axis_kind, AnyInteger: $extent, AnyInteger:$binding);
 
   let results = (outs AnyInteger:$result);
 
-  let assemblyFormat = "$axis_kind $binding attr-dict `:` type($result)";
+  let assemblyFormat = "$axis_kind $extent `=` $binding attr-dict `:` type($result)";
 
 }
 
