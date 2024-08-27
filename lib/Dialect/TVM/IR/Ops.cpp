@@ -56,6 +56,10 @@ InitOp BlockOp::getInitOp() {
   return nullptr;
 }
 
+LogicalResult RefOp::verify() {
+  return success(getMemRefType().getRank() == getIndices().size());
+}
+
 BlockOp AssignOp::getBlockOp() {
   auto *parent = getOperation()->getParentOp();
   if (isa<InitOp>(parent)) {

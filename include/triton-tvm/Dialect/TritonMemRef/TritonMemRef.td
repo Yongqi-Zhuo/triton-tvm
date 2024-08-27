@@ -57,7 +57,6 @@ def TritonMemRef_MemRefToTensorOp : Op<
   "memref_to_tensor",
   [
     Pure,
-    SameOperandsAndResultShape,
     SameOperandsAndResultElementType,
   ]
 > {

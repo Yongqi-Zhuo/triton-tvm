@@ -265,9 +265,8 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
 }
 
 // Traverse the loop nest and collect.
-SmallVector<scf::ForOp> collectLoopsInScope(OpBuilder &b) {
+SmallVector<scf::ForOp> collectLoopsInScope(Block *block) {
   SmallVector<scf::ForOp> loops;
-  auto *block = b.getBlock();
   while (block) {
     auto *parentOp = block->getParentOp();
     if (!parentOp)
@@ -371,10 +370,14 @@ struct Computation {
   tvm::BlockOp block;
   // The outer loop nest has already been mapped.
   IRMapping mapper;
-  // The reduction dim.
-  ReductionDim rDim;
   // With tvm.axis applied.
   SmallVector<Value> innerLoopsAxes;
+  // The reduction dim.
+  ReductionDim rDim;
+  // The outer loops axes.
+  SmallVector<Value> outerLoopsAxes;
+  // The allocated buffer.
+  tvm::AllocBufferOp buffer;
 
   [[nodiscard]] OpBuilder::InsertionGuard enterBlock(OpBuilder &b) {
     OpBuilder::InsertionGuard guard(b);
@@ -394,6 +397,10 @@ struct Computation {
   static SmallVector<Value> getIndexArrayAsType(OpBuilder &b, ValueRange array,
                                                 Type type) {
     return llvm::map_to_vector(array, [&](Value value) {
+      // Fast path: if the value is already of the right type, just return it.
+      if (auto indexCastOp = value.getDefiningOp<arith::IndexCastOp>())
+        if (indexCastOp.getIn().getType() == type)
+          return indexCastOp.getIn();
       return b.create<arith::IndexCastOp>(value.getLoc(), type, value)
           .getResult();
     });
@@ -417,6 +424,18 @@ struct Computation {
     return getArrayAsIndexType(b, getInnerLoopsIndices());
   }
 
+  SmallVector<Value> getOuterLoopsIndices() const {
+    return llvm::map_to_vector(outerLoopsAxes, [](Value axis) {
+      return static_cast<Value>(axis.getDefiningOp<tvm::AxisOp>().getBinding());
+    });
+  }
+
+  SmallVector<Value> getOuterLoopsExtents() const {
+    return llvm::map_to_vector(outerLoopsAxes, [](Value axis) {
+      return static_cast<Value>(axis.getDefiningOp<tvm::AxisOp>().getExtent());
+    });
+  }
+
   SmallVector<Value> inlineFunction(OpBuilder &b, Operation *op,
                                     ValueRange args) {
     auto &generator = op->getRegion(0).front();
@@ -424,39 +443,91 @@ struct Computation {
     return inlineRecursively(b, generator, mapper);
   }
 
-  tvm::RefOp getDest(OpBuilder &b, Location loc, tvm::AllocBufferOp buffer) {
-    if (rDim.isSpatial()) {
-      return b.create<tvm::RefOp>(loc, buffer, innerLoopsAxes);
+  // Here, we access the buffer with the outer loop indices.
+  tvm::RefOp getDest(OpBuilder &b, Location loc) {
+    auto axes = innerLoopsAxes;
+    if (!rDim.isSpatial()) {
+      axes.erase(axes.begin() + rDim.get());
     }
-    SmallVector<Value> innerLoopsAxesWithoutReduction = innerLoopsAxes;
-    innerLoopsAxesWithoutReduction.erase(
-        innerLoopsAxesWithoutReduction.begin() + rDim.get());
-    return b.create<tvm::RefOp>(loc, buffer, innerLoopsAxesWithoutReduction);
+    std::copy(outerLoopsAxes.begin(), outerLoopsAxes.end(),
+              std::inserter(axes, axes.begin()));
+    return b.create<tvm::RefOp>(loc, buffer, axes);
   }
 };
 
-tvm::AllocBufferOp allocateBuffer(OpBuilder &b, Location loc,
-                                  RankedTensorType tensorType) {
-  return b.create<tvm::AllocBufferOp>(
-      loc, MemRefType::get(tensorType.getShape(), tensorType.getElementType()),
-      b.getStringAttr("shared"));
+SmallVector<Value>
+getOuterLoopsAxesInBlockFromVars(tvm::BlockOp blockOp,
+                                 SmallVectorImpl<Value> &outerLoopsVars) {
+  IRMapping mapper;
+  // Get all axes definitions in the computation block.
+  for (auto &op : *blockOp.getBody()) {
+    if (auto axis = dyn_cast<tvm::AxisOp>(op)) {
+      mapper.map(axis.getBinding(), axis);
+    }
+  }
+  return llvm::map_to_vector(outerLoopsVars,
+                             [&](Value var) { return mapper.lookup(var); });
+}
+
+Block::iterator getPointInBlockWhereAllAxesAreDefined(tvm::BlockOp blockOp) {
+  auto *block = blockOp.getBody();
+  Block::iterator ret = block->begin();
+  for (auto it = block->begin(), e = block->end(); it != e; ++it) {
+    if (isa<tvm::AxisOp>(it)) {
+      ret = std::next(it);
+    }
+  }
+  return ret;
 }
 
 Computation computeTensor(OpBuilder &b, Location loc,
-                          RankedTensorType tensorType, ReductionDim rDim) {
+                          RankedTensorType tensorType, ReductionDim rDim,
+                          RankedTensorType allocType) {
   Computation result{.rDim = rDim};
 
+  // Collect outer loops.
+  auto outerLoopNest = collectLoopsInScope(b.getBlock());
+  auto outerLoopsExtents = getExtentsFromLoopNest(outerLoopNest);
+  auto outerLoopsVars = getInductionVarsFromLoopNest(outerLoopNest);
+
+  if (allocType) {
+    // 1. Allocate buffer.
+    auto shape =
+        // Get outer loops extents. For the time being, we require outer loops
+        // to have constant extent.
+        llvm::map_to_vector(outerLoopsExtents, [&](Value extent) {
+          return cast<IntegerAttr>(
+                     extent.getDefiningOp<arith::ConstantOp>().getValue())
+              .getValue()
+              .getSExtValue();
+        });
+    // Get result tensor shape.
+    auto tensorShape = allocType.getShape();
+    // Prepend the result tensor shape with the outer loops extents. This is
+    // required by TVM.
+    std::copy(tensorShape.begin(), tensorShape.end(),
+              std::back_inserter(shape));
+    auto buffer = b.create<tvm::AllocBufferOp>(
+        loc, MemRefType::get(shape, allocType.getElementType()),
+        b.getStringAttr("shared"));
+    result.buffer = buffer;
+
+    // // TODO: make sure this really works and does not break the rewriter.
+    // if (!outerLoopNest.empty()) {
+    //   // Promote this allocation to the root scope.
+    //   buffer->moveBefore(outerLoopNest.front());
+    // }
+  }
+
   // 2. Get into the loop nest and create tvm.block.
-  auto outerLoopNest = collectLoopsInScope(b);
-  auto outerLoopVars = getInductionVarsFromLoopNest(outerLoopNest);
   auto innerLoopNest = generateLoopNest(b, loc, tensorType, rDim);
   OpBuilder::InsertionGuard guard(b);
   innerLoopNest.setInsertingToInnermost(b);
   result.block = b.create<tvm::BlockOp>(loc, [&](OpBuilder &b, Location loc) {
     // 3. Map every induction var to tvm.axis.
     // All outer loops are parallel loops.
-    auto outerLoopsAxes =
-        mapVarsToAxes(b, getExtentsFromLoopNest(outerLoopNest), outerLoopVars,
+    result.outerLoopsAxes =
+        mapVarsToAxes(b, outerLoopsExtents, outerLoopsVars,
                       ReductionDim::createSpatial(tensorType.getRank()));
     // We can consolidate multiple inner loops into one induction variable.
     result.innerLoopsAxes = mapVarsToAxes(
@@ -467,7 +538,7 @@ Computation computeTensor(OpBuilder &b, Location loc,
               return tvm::utils::getConstantOpI32(b, loc, extent).getResult();
             }),
         innerLoopNest.tensorIndices, rDim);
-    result.mapper.map(outerLoopVars, outerLoopsAxes);
+    result.mapper.map(outerLoopsVars, result.outerLoopsAxes);
   });
 
   // Do not forget to apply bufferization.to_tensor.
@@ -479,12 +550,13 @@ Operation *materializeIntermediateTensor(OpBuilder &b,
   auto tensorType = tensor.getType();
   auto loc = tensor.getLoc();
 
-  // 1. Allocate buffer (and apply bufferization.to_tensor later).
-  auto buffer = allocateBuffer(b, loc, tensorType);
-
   auto computation = computeTensor(
-      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()));
-  auto &[block, mapper, _, innerLoopsAxes] = computation;
+      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()),
+      tensorType);
+  auto &block = computation.block;
+  auto &mapper = computation.mapper;
+  auto &innerLoopsAxes = computation.innerLoopsAxes;
+  auto &buffer = computation.buffer;
 
   {
     // Enter the block.
@@ -497,7 +569,7 @@ Operation *materializeIntermediateTensor(OpBuilder &b,
         computation.inlineFunction(b, tensor, innerLoopsAxesAsIndexType)[0];
 
     // 5. tvm.write and tvm.assign the tensor.
-    auto lhs = computation.getDest(b, loc, buffer);
+    auto lhs = computation.getDest(b, loc);
     b.create<tvm::WriteOp>(loc, ValueRange{lhs});
     b.create<tvm::AssignOp>(loc, lhs, rhs);
   }
@@ -522,12 +594,13 @@ Operation *materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   auto tensorType = cast<RankedTensorType>(load.getType());
   auto loc = load.getLoc();
 
-  // 1. Allocate buffer (and apply bufferization.to_tensor later).
-  auto buffer = allocateBuffer(b, loc, tensorType);
-
   auto computation = computeTensor(
-      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()));
-  auto &[block, mapper, _, innerLoopsAxes] = computation;
+      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()),
+      tensorType);
+  auto &block = computation.block;
+  auto &mapper = computation.mapper;
+  auto &innerLoopsAxes = computation.innerLoopsAxes;
+  auto &buffer = computation.buffer;
 
   {
     // Enter the block.
@@ -567,7 +640,7 @@ Operation *materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
     }
 
     // 5. tvm.write and tvm.assign the tensor.
-    auto lhs = computation.getDest(b, loc, buffer);
+    auto lhs = computation.getDest(b, loc);
     b.create<tvm::WriteOp>(loc, ValueRange{lhs});
     b.create<tvm::AssignOp>(loc, lhs, rhs);
   }
@@ -594,8 +667,11 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
   // parameter.
 
   auto computation = computeTensor(
-      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()));
-  auto &[block, mapper, _, innerLoopsAxes] = computation;
+      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()),
+      /*allocType=*/nullptr);
+  auto &block = computation.block;
+  auto &mapper = computation.mapper;
+  auto &innerLoopsAxes = computation.innerLoopsAxes;
 
   {
     // Enter the block.
@@ -704,13 +780,15 @@ Operation *materializeReduceOp(OpBuilder &b, triton::ReduceOp reduce) {
             return nullptr;
           });
 
-  // 1. Allocate buffer (and apply bufferization.to_tensor later).
-  auto buffer = allocateBuffer(b, loc, resultTensorType);
-
   auto computation = computeTensor(
       b, loc, inputType,
-      ReductionDim::createReduction(inputType.getRank(), reduce.getAxis()));
-  auto &[block, mapper, rDim, innerLoopsAxes] = computation;
+      ReductionDim::createReduction(inputType.getRank(), reduce.getAxis()),
+      /*allocType=*/resultTensorType);
+  auto &block = computation.block;
+  auto &mapper = computation.mapper;
+  auto &innerLoopsAxes = computation.innerLoopsAxes;
+  auto &rDim = computation.rDim;
+  auto &buffer = computation.buffer;
 
   {
     // Enter the block.
@@ -718,7 +796,7 @@ Operation *materializeReduceOp(OpBuilder &b, triton::ReduceOp reduce) {
     auto innerLoopsAxesAsIndexType =
         computation.getInnerLoopsAxesAsIndexType(b);
 
-    auto acc = computation.getDest(b, loc, buffer);
+    auto acc = computation.getDest(b, loc);
 
     // 5. tvm.write
     b.create<tvm::WriteOp>(loc, ValueRange{acc});
@@ -757,6 +835,24 @@ struct ReduceOpConverter : public OpConversionPattern<triton::ReduceOp> {
     return success();
   }
 };
+
+tvm::BlockOp getOwnerBlockOp(Operation *op) {
+  while (op) {
+    if (auto blockOp = dyn_cast<tvm::BlockOp>(op))
+      return blockOp;
+    op = op->getParentOp();
+  }
+  return nullptr;
+}
+
+func::FuncOp getOwnerFuncOp(Operation *op) {
+  while (op) {
+    if (auto funcOp = dyn_cast<func::FuncOp>(op))
+      return funcOp;
+    op = op->getParentOp();
+  }
+  return nullptr;
+}
 
 } // namespace
 
@@ -862,26 +958,79 @@ public:
           extractOp.getTensor().getDefiningOp<ttm::MemRefToTensorOp>();
       assert(memrefBackedTensor &&
              "Expected all tensors to be results of memref_to_tensor");
+      auto allocatedMemRef = memrefBackedTensor.getMemRef();
 
       // Compute the consumers. All consumers are in the forward slice.
-      SetVector<Operation *> slice;
-      getForwardSlice(extractOp.getOperation(), &slice);
-      IRRewriter rewriter(extractOp);
-      // Note that we have to cast the indices to i32.
-      auto indices = Computation::getIndexArrayAsType(
-          rewriter, extractOp.getIndices(), rewriter.getI32Type());
+      // For later use, we compute the owner block of each Op in the slice.
+      SmallVector<std::pair<Operation *, tvm::BlockOp>> sliceAndOwner;
+      {
+        SetVector<Operation *> slice;
+        getForwardSlice(extractOp.getOperation(), &slice);
+        std::transform(slice.begin(), slice.end(),
+                       std::back_inserter(sliceAndOwner), [&](Operation *op) {
+                         return std::make_pair(op, getOwnerBlockOp(op));
+                       });
+      }
 
-      // Now that the slice is collected, we can erase the extract op, and
-      // replace with standard tvm.ref, which has no consumer/producer
-      // information.
-      auto refOp = rewriter.create<tvm::RefOp>(
-          extractOp.getLoc(), memrefBackedTensor.getMemRef(), indices);
-      rewriter.replaceOp(extractOp, refOp);
+      auto inlineOpsNotInBlockAndUpdateUses =
+          [&](OpBuilder &b, tvm::BlockOp blockOp,
+              SetVector<Operation *> &required, IRMapping &mapper) {
+            // Since the slice is already in topological order, we only need to
+            // inline one by one.
+            for (auto [op, ownerBlockOp] : sliceAndOwner) {
+              if (required.contains(op) && ownerBlockOp != blockOp) {
+                assert(isPure(op) && "expected pure op");
+                assert(op->getNumRegions() == 0 && "expected no regions");
+                b.cloneWithoutRegions(*op, mapper);
+              }
+            }
+            // Then update all uses.
+            for (auto [op, ownerBlockOp] : sliceAndOwner) {
+              if (required.contains(op) && ownerBlockOp == blockOp) {
+                SmallVector<Value> remappedOperands;
+                for (auto operand : op->getOperands()) {
+                  remappedOperands.push_back(mapper.lookupOrDefault(operand));
+                }
+                op->setOperands(remappedOperands);
+              }
+            }
+          };
+
+      OpBuilder b(extractOp);
+      // Note that we have to cast the indices to i32.
+      auto indices = Computation::getIndexArrayAsType(b, extractOp.getIndices(),
+                                                      b.getI32Type());
+
+      auto allocation = allocatedMemRef.getDefiningOp<tvm::AllocBufferOp>();
+      auto outerLoopNest = collectLoopsInScope(allocation->getBlock());
+      auto outerLoopsVars = getInductionVarsFromLoopNest(outerLoopNest);
 
       // For each corresponding BlockOp, add its producer.
-      for (auto *op : slice) {
+      for (auto [op, ownerBlockOp] : sliceAndOwner) {
         if (auto assignOp = dyn_cast<tvm::AssignOp>(op)) {
-          producers[assignOp.getBlockOp()].push_back(refOp);
+          auto blockOp = assignOp.getBlockOp();
+          // Note that we have to use outer loops axes to access the buffer.
+          auto fullIndices =
+              getOuterLoopsAxesInBlockFromVars(blockOp, outerLoopsVars);
+          std::copy(indices.begin(), indices.end(),
+                    std::back_inserter(fullIndices));
+          OpBuilder::InsertionGuard guard(b);
+          b.setInsertionPoint(blockOp.getBody(),
+                              getPointInBlockWhereAllAxesAreDefined(blockOp));
+          // For later use. Only ops that are in the backward slice of the
+          // assign op are required.
+          SetVector<Operation *> required;
+          getBackwardSlice(assignOp, &required);
+          // Now that the slice is collected, we can erase the extract op,
+          // and replace with standard tvm.ref, which has no
+          // consumer/producer information.
+          auto refOp = b.create<tvm::RefOp>(extractOp.getLoc(), allocatedMemRef,
+                                            fullIndices);
+          producers[blockOp].push_back(refOp);
+          // And we have to replace all uses of the extract op with the ref op.
+          IRMapping mapper;
+          mapper.map(extractOp.getResult(), refOp.getResult());
+          inlineOpsNotInBlockAndUpdateUses(b, blockOp, required, mapper);
         }
       }
     });
@@ -896,6 +1045,16 @@ public:
         b.create<tvm::ReadOp>(assignOp.getLoc(), refs);
       }
     });
+
+    // Finally, promote the buffers to the outermost scope.
+    SmallVector<tvm::AllocBufferOp> allocations;
+    moduleOp.walk(
+        [&](tvm::AllocBufferOp alloc) { allocations.push_back(alloc); });
+    for (auto alloc : allocations) {
+      auto func = getOwnerFuncOp(alloc);
+      auto &entryBlock = func.getFunctionBody().front();
+      alloc->moveBefore(&entryBlock, entryBlock.begin());
+    }
   }
 };
 

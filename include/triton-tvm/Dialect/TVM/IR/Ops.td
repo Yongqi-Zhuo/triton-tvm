@@ -223,6 +223,8 @@ def TVM_RefOp : TVM_Op<"ref", [
 
   let assemblyFormat = "$memref `[` $indices `]` attr-dict `:` type($memref)";
 
+  let hasVerifier = 1;
+
 }
 
 def TVM_IfThenElseOp : TVM_Op<"if_then_else", [
