@@ -28,6 +28,34 @@ void BlockOp::build(OpBuilder &builder, OperationState &result,
   }
 }
 
+ReadOp BlockOp::getReadOp() {
+  for (auto &op : *getBody())
+    if (auto r = dyn_cast<ReadOp>(op))
+      return r;
+  return nullptr;
+}
+
+WriteOp BlockOp::getWriteOp() {
+  for (auto &op : *getBody())
+    if (auto w = dyn_cast<WriteOp>(op))
+      return w;
+  return nullptr;
+}
+
+AssignOp BlockOp::getAssignOp() {
+  for (auto &op : *getBody())
+    if (auto a = dyn_cast<AssignOp>(op))
+      return a;
+  return nullptr;
+}
+
+InitOp BlockOp::getInitOp() {
+  for (auto &op : *getBody())
+    if (auto i = dyn_cast<InitOp>(op))
+      return i;
+  return nullptr;
+}
+
 void InitOp::build(OpBuilder &builder, OperationState &result,
                    function_ref<void(OpBuilder &, Location)> bodyBuilder) {
   OpBuilder::InsertionGuard guard(builder);

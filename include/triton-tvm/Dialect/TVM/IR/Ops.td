@@ -131,6 +131,12 @@ def TVM_BlockOp : TVM_Op<"block", [
 
   let assemblyFormat = "regions attr-dict";
 
+  let extraClassDeclaration = [{
+    ReadOp getReadOp();
+    WriteOp getWriteOp();
+    AssignOp getAssignOp();
+    InitOp getInitOp();
+  }];
 }
 
 def TVM_WhereOp : TVM_Op<"where", [

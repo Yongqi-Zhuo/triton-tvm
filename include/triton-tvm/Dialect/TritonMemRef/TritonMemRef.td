@@ -68,21 +68,9 @@ def TritonMemRef_MemRefToTensorOp : Op<
     that it cannot keep any encoding attributes. This op relaxes such requirements.
   }];
 
-  let arguments = (ins Arg<AnyRankedOrUnrankedMemRef,
-                          "the reference to load from",
-                          [MemReadAt<0, FullEffect>]>:$memref);
+  let arguments = (ins AnyRankedOrUnrankedMemRef:$memref);
 
   let results = (outs AnyTensor:$result);
-
-  let extraClassDeclaration = [{
-    /// The result is always a tensor.
-    TensorType getType() {
-      Type resultType = getResult().getType();
-      if (::llvm::isa<TensorType>(resultType))
-        return ::llvm::cast<TensorType>(resultType);
-      return {};
-    }
-  }];
 
   let assemblyFormat = [{
     $memref attr-dict `:` type($memref) `to` type($result)

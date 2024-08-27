@@ -11,6 +11,7 @@
 #include "mlir/IR/Operation.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Pass/PassManager.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/TypeSwitch.h"
@@ -473,7 +474,8 @@ Computation computeTensor(OpBuilder &b, Location loc,
   return result;
 }
 
-void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
+Operation *materializeIntermediateTensor(OpBuilder &b,
+                                         tensor::GenerateOp tensor) {
   auto tensorType = tensor.getType();
   auto loc = tensor.getLoc();
 
@@ -501,11 +503,22 @@ void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
   }
 
   // 6. bufferization.to_tensor
-  auto unbufferized = b.create<ttm::MemRefToTensorOp>(loc, tensorType, buffer);
-  tensor->replaceAllUsesWith(unbufferized->getResults());
+  return b.create<ttm::MemRefToTensorOp>(loc, tensorType, buffer);
 }
 
-void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
+// This rewrites all tensor.generate ops. So make sure to run DCE before this so
+// we do not materialize pointers, masks, and constants, e.t.c..
+struct GenerateOpConverter : public OpConversionPattern<tensor::GenerateOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(tensor::GenerateOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, materializeIntermediateTensor(rewriter, op));
+    return success();
+  }
+};
+
+Operation *materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   auto tensorType = cast<RankedTensorType>(load.getType());
   auto loc = load.getLoc();
 
@@ -560,12 +573,18 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   }
 
   // 6. bufferization.to_tensor
-  auto unbufferized = b.create<ttm::MemRefToTensorOp>(loc, tensorType, buffer);
-  load->replaceAllUsesWith(unbufferized->getResults());
-
-  // Remove the load.
-  load->erase();
+  return b.create<ttm::MemRefToTensorOp>(loc, tensorType, buffer);
 }
+
+struct LoadOpConverter : public OpConversionPattern<triton::LoadOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(triton::LoadOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, materializeLoadOp(rewriter, op));
+    return success();
+  }
+};
 
 void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
   auto tensorType = cast<RankedTensorType>(store.getPtr().getType());
@@ -620,12 +639,20 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
   }
 
   // 6. No need to bufferization.to_tensor.
-
-  // Remove the store.
-  store->erase();
 }
 
-void materializeReduceOp(OpBuilder &b, triton::ReduceOp reduce) {
+struct StoreOpConverter : public OpConversionPattern<triton::StoreOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(triton::StoreOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    materializeStoreOp(rewriter, op);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+Operation *materializeReduceOp(OpBuilder &b, triton::ReduceOp reduce) {
   assert(reduce.getNumOperands() == 1 && "expected single operand to reduce");
   auto input = reduce.getOperand(0);
   auto inputType = cast<RankedTensorType>(input.getType());
@@ -716,11 +743,22 @@ void materializeReduceOp(OpBuilder &b, triton::ReduceOp reduce) {
   // if the result is scalar, we have to extract the value.
   if (isResultScalar) {
     auto scalar = b.create<tensor::ExtractOp>(loc, unbufferized, ValueRange{});
-    reduce->replaceAllUsesWith(scalar->getResults());
-  } else {
-    reduce->replaceAllUsesWith(unbufferized->getResults());
+    return scalar;
   }
+  return unbufferized;
 }
+
+struct ReduceOpConverter : public OpConversionPattern<triton::ReduceOp> {
+  using OpConversionPattern::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(triton::ReduceOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, materializeReduceOp(rewriter, op));
+    return success();
+  }
+};
+
+void readBlockOpProducers(tvm::BlockOp blockOp) {}
 
 } // namespace
 
@@ -762,31 +800,61 @@ public:
     //    - Others. All tensor.generate. Note that we can reject materializing
     //      pointer tensors for the time being, because we choose not to support
     //      indirection.
+
+    lowerLoadAndStore();
+    lowerAllTensors();
+    readProducers();
+  }
+
+  void lowerLoadAndStore() {
     auto moduleOp = getOperation();
-    moduleOp.walk([&](tensor::GenerateOp tensor) {
-      for (auto *user : tensor->getUsers()) {
-        if (isa<triton::LoadOp>(user) || isa<triton::StoreOp>(user))
-          return;
-      }
-      OpBuilder builder(&getContext());
-      builder.setInsertionPointAfter(tensor);
-      materializeIntermediateTensor(builder, tensor);
-    });
-    moduleOp.walk([&](triton::LoadOp load) {
-      OpBuilder builder(&getContext());
-      builder.setInsertionPointAfter(load);
-      materializeLoadOp(builder, load);
-    });
-    moduleOp.walk([&](triton::StoreOp store) {
-      OpBuilder builder(&getContext());
-      builder.setInsertionPointAfter(store);
-      materializeStoreOp(builder, store);
-    });
-    moduleOp.walk([&](triton::ReduceOp reduce) {
-      OpBuilder builder(&getContext());
-      builder.setInsertionPointAfter(reduce);
-      materializeReduceOp(builder, reduce);
-    });
+
+    RewritePatternSet patterns(&getContext());
+    ConversionTarget target(getContext());
+
+    target.addLegalDialect<arith::ArithDialect, math::MathDialect,
+                           scf::SCFDialect, tensor::TensorDialect,
+                           ttm::TritonMemRefDialect, tvm::TVMDialect>();
+    target.addIllegalOp<triton::LoadOp, triton::StoreOp>();
+    patterns.add<LoadOpConverter, StoreOpConverter>(&getContext());
+
+    if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
+      moduleOp.emitError("Failed to lower tt.load and tt.store.");
+      signalPassFailure();
+    }
+  }
+
+  void lowerAllTensors() {
+    auto moduleOp = getOperation();
+
+    PassManager pm(&getContext(), moduleOp.getOperationName());
+    // This is necessary because we need to eliminate the tensors used only by
+    // tt.load and tt.store.
+    pm.addPass(createCanonicalizerPass());
+    if (failed(runPipeline(pm, moduleOp))) {
+      signalPassFailure();
+    }
+
+    RewritePatternSet patterns(&getContext());
+    ConversionTarget target(getContext());
+
+    target.addLegalDialect<arith::ArithDialect, math::MathDialect,
+                           scf::SCFDialect, ttm::TritonMemRefDialect,
+                           tvm::TVMDialect>();
+    target.addDynamicallyLegalDialect<tensor::TensorDialect>(
+        [](Operation *op) { return !isa<tensor::GenerateOp>(op); });
+    target.addIllegalOp<tensor::GenerateOp, triton::ReduceOp>();
+    patterns.add<GenerateOpConverter, ReduceOpConverter>(&getContext());
+
+    if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
+      moduleOp.emitError("Failed to lower tensor.generate and tt.reduce.");
+      signalPassFailure();
+    }
+  }
+
+  void readProducers() {
+    auto moduleOp = getOperation();
+    moduleOp.walk([&](tvm::BlockOp blockOp) { readBlockOpProducers(blockOp); });
   }
 };
 
