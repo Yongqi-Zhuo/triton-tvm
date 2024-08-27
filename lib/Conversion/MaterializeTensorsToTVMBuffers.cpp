@@ -90,6 +90,9 @@ struct LoopNest {
   SmallVector<scf::ForOp> loops;
   // The induction vars are recovered to tensor indices.
   SmallVector<Value> tensorIndices;
+  // If no contraction, this is the tensor shape. Otherwise, an additional
+  // reduction dim is appended.
+  SmallVector<int64_t> tensorShape;
 
   void setInsertingToInnermost(OpBuilder &b) {
     if (loops.empty())
@@ -98,12 +101,62 @@ struct LoopNest {
   }
 };
 
+// reductionDim is the dimension to be reduced.
+// If no reduction is required, reductionDim = -1.
+// If the reduction is not in the tensor type, e.g., tt.dot where matmul
+// contracts a dimension, reductionDim = rank.
+class ReductionDim {
+  int rank;        // rank of tensor
+  int dim;         // the reduction dim
+  unsigned extent; // the extent of the additional loop
+  ReductionDim(int rank, int dim, int extent)
+      : rank(rank), dim(dim), extent(extent) {}
+
+public:
+  static ReductionDim createSpatial(unsigned rank) {
+    return ReductionDim(rank, -1, 0);
+  }
+  static ReductionDim createReduction(unsigned rank, unsigned dim) {
+    assert(dim < rank && "reduction dim out of range");
+    return ReductionDim(rank, dim, 0);
+  }
+  static ReductionDim createContraction(unsigned rank, unsigned extent) {
+    return ReductionDim(rank, rank, extent);
+  }
+  bool isSpatial() const { return dim < 0; }
+  bool isReduction() const { return dim >= 0 && dim < rank; }
+  bool isContraction() const { return dim == rank; }
+  unsigned getRank() const { return rank; }
+  unsigned get() const {
+    assert(!isSpatial() && "no reduction");
+    return dim;
+  }
+  bool isDimReduced(unsigned d) const { return d == dim; }
+  unsigned getContractionExtent() const {
+    assert(isContraction() && "not a contraction");
+    return extent;
+  }
+  template <typename T>
+  inline T match(T spatial, T reduction, T contraction) const {
+    if (isSpatial())
+      return spatial;
+    if (isReduction())
+      return reduction;
+    if (isContraction())
+      return contraction;
+    llvm_unreachable("unexpected reduction dim");
+  }
+};
+
 // TODO: add vectorize option.
-LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
+LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
+                          ReductionDim rDim) {
   const auto layout =
       cast<triton::gpu::BlockedEncodingAttr>(tensor.getEncoding());
   // Ignore Hopper. CGA size is always 1.
+
   SmallVector<LoopSpec> specs;
+
   // Here is our loop nest:
   // for warpsPerCTA[order[r-1]]:
   //  ...
@@ -128,6 +181,15 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
   const auto layoutWarpsPerCTA = layout.getWarpsPerCTA();
   const auto layoutThreadsPerWarp = layout.getThreadsPerWarp();
   const auto layoutSizePerThread = layout.getSizePerThread();
+
+  // For reduction, perform some basic checks.
+  if (rDim.isReduction()) {
+    assert(layoutOrder[0] == rDim.get() &&
+           "reduction dim must be the most contiguous dimension");
+    assert(layoutSizePerThread[rDim.get()] == 1 &&
+           "cannot vectorize a cross-thread reduction");
+  }
+
   for (Stage stage = static_cast<Stage>(0); stage < STAGE_COUNT;
        stage = static_cast<Stage>(stage + 1)) {
     // From the least contiguous dimension to the most contiguous dimension.
@@ -150,12 +212,16 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
         spec.extent = tensor.getDimSize(dim) /
                       (layoutWarpsPerCTA[dim] * layoutThreadsPerWarp[dim] *
                        layoutSizePerThread[dim]);
-        spec.kind = tvm::ForKind::UNROLL;
+        // TODO: Will this work?
+        spec.kind = rDim.match(tvm::ForKind::UNROLL, tvm::ForKind::SERIAL,
+                               tvm::ForKind::UNROLL);
         break;
       case STAGE_SIZE_PER_THREAD:
         spec.extent = layoutSizePerThread[dim];
-        spec.kind =
-            order == 0 ? tvm::ForKind::VECTORIZED : tvm::ForKind::UNROLL;
+        spec.kind = rDim.match(order == 0 ? tvm::ForKind::VECTORIZED
+                                          : tvm::ForKind::UNROLL,
+                               tvm::ForKind::UNROLL, // unreachable
+                               tvm::ForKind::UNROLL);
         break;
       default:
         llvm_unreachable("unexpected stage");
@@ -164,6 +230,10 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
         specs.push_back(spec);
     }
   }
+  if (rDim.isContraction()) {
+    specs.push_back({rDim.getContractionExtent(), tvm::ForKind::SERIAL,
+                     std::nullopt, rDim.get()});
+  }
   auto loops = generateLoopNestFromSpecs(b, loc, specs);
 
   // Then recover the tensor indices.
@@ -171,8 +241,9 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
   if (!loops.empty())
     b.setInsertionPointToStart(loops.back().getBody());
   auto zero = tvm::utils::getConstantOpI32(b, loc, 0);
-  SmallVector<Value> tensorIndices(tensor.getRank(), zero);
-  SmallVector<unsigned> strides(tensor.getRank(), 1);
+  SmallVector<Value> tensorIndices(tensor.getRank() + rDim.isContraction(),
+                                   zero);
+  SmallVector<unsigned> strides(tensor.getRank() + rDim.isContraction(), 1);
   for (int forLoopId = static_cast<int>(specs.size()) - 1; forLoopId >= 0;
        --forLoopId) {
     Value inductionVar = loops[forLoopId].getInductionVar();
@@ -183,7 +254,12 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor) {
         b.create<arith::AddIOp>(loc, tensorIndices[dim], offset);
     strides[dim] *= specs[forLoopId].extent;
   }
-  return LoopNest{std::move(loops), std::move(tensorIndices)};
+  SmallVector<int64_t> tensorShape(tensor.getShape());
+  if (rDim.isContraction()) {
+    tensorShape.push_back(rDim.getContractionExtent());
+  }
+  return LoopNest{std::move(loops), std::move(tensorIndices),
+                  std::move(tensorShape)};
 }
 
 // Traverse the loop nest and collect.
@@ -227,12 +303,15 @@ SmallVector<Value> getExtentsFromLoopNest(SmallVectorImpl<scf::ForOp> &loops) {
   return extents;
 }
 
-SmallVector<Value> mapVarsToSpatialAxes(OpBuilder &b, ValueRange extents,
-                                        ValueRange vars) {
+SmallVector<Value> mapVarsToAxes(OpBuilder &b, ValueRange extents,
+                                 ValueRange vars, ReductionDim rDim) {
   SmallVector<Value> axes;
-  for (auto [extent, var] : llvm::zip(extents, vars)) {
+  for (auto [dim, extent, var] : llvm::enumerate(extents, vars)) {
     axes.push_back(b.create<tvm::AxisOp>(
-        var.getLoc(), b.getAttr<tvm::AxisKindAttr>(tvm::AxisKind::SPATIAL),
+        var.getLoc(),
+        b.getAttr<tvm::AxisKindAttr>(rDim.isDimReduced(dim)
+                                         ? tvm::AxisKind::REDUCTION
+                                         : tvm::AxisKind::SPATIAL),
         extent, var));
   }
   return axes;
@@ -296,6 +375,8 @@ struct Computation {
   tvm::BlockOp block;
   // The outer loop nest has already been mapped.
   IRMapping mapper;
+  // The reduction dim.
+  ReductionDim rDim;
   // With tvm.axis applied.
   SmallVector<Value> innerLoopsAxes;
 
@@ -335,16 +416,21 @@ struct Computation {
     return getArrayAsIndexType(b, getInnerLoopsIndices());
   }
 
-  SmallVector<Value>
-  inlineGenerator(OpBuilder &b, tensor::GenerateOp generateOp,
-                  ArrayRef<Value> innerLoopsAxesAsIndexType) {
-    auto &generator = generateOp.getBody().front();
-    mapper.map(generator.getArguments(), innerLoopsAxesAsIndexType);
+  SmallVector<Value> inlineFunction(OpBuilder &b, Operation *op,
+                                    ValueRange args) {
+    auto &generator = op->getRegion(0).front();
+    mapper.map(generator.getArguments(), args);
     return inlineRecursively(b, generator, mapper);
   }
 
   tvm::RefOp getDest(OpBuilder &b, Location loc, tvm::AllocBufferOp buffer) {
-    return b.create<tvm::RefOp>(loc, buffer, innerLoopsAxes);
+    if (rDim.isSpatial()) {
+      return b.create<tvm::RefOp>(loc, buffer, innerLoopsAxes);
+    }
+    SmallVector<Value> innerLoopsAxesWithoutReduction = innerLoopsAxes;
+    innerLoopsAxesWithoutReduction.erase(
+        innerLoopsAxesWithoutReduction.begin() + rDim.get());
+    return b.create<tvm::RefOp>(loc, buffer, innerLoopsAxesWithoutReduction);
   }
 };
 
@@ -356,29 +442,32 @@ tvm::AllocBufferOp allocateBuffer(OpBuilder &b, Location loc,
 }
 
 Computation computeTensor(OpBuilder &b, Location loc,
-                          RankedTensorType tensorType) {
-  Computation result;
+                          RankedTensorType tensorType, ReductionDim rDim) {
+  Computation result{.rDim = rDim};
 
   // 2. Get into the loop nest and create tvm.block.
-  {
-    OpBuilder::InsertionGuard guard(b);
-    auto outerLoopNest = collectLoopsInScope(b);
-    auto outerLoopVars = getInductionVarsFromLoopNest(outerLoopNest);
-    auto innerLoopNest = generateLoopNest(b, loc, tensorType);
-    innerLoopNest.setInsertingToInnermost(b);
-    result.block = b.create<tvm::BlockOp>(loc, [&](OpBuilder &b, Location loc) {
-      // 3. Map every induction var to tvm.axis.
-      // Now we pretend there are only parallel dims. TODO: support reduction
-      // dims.
-      auto outerLoopsAxes = mapVarsToSpatialAxes(
-          b, getExtentsFromLoopNest(outerLoopNest), outerLoopVars);
-      // We can consolidate multiple inner loops into one induction variable.
-      result.innerLoopsAxes =
-          mapVarsToSpatialAxes(b, getExtentsFromLoopNest(innerLoopNest.loops),
-                               innerLoopNest.tensorIndices);
-      result.mapper.map(outerLoopVars, outerLoopsAxes);
-    });
-  }
+  auto outerLoopNest = collectLoopsInScope(b);
+  auto outerLoopVars = getInductionVarsFromLoopNest(outerLoopNest);
+  auto innerLoopNest = generateLoopNest(b, loc, tensorType, rDim);
+  OpBuilder::InsertionGuard guard(b);
+  innerLoopNest.setInsertingToInnermost(b);
+  result.block = b.create<tvm::BlockOp>(loc, [&](OpBuilder &b, Location loc) {
+    // 3. Map every induction var to tvm.axis.
+    // All outer loops are parallel loops.
+    auto outerLoopsAxes =
+        mapVarsToAxes(b, getExtentsFromLoopNest(outerLoopNest), outerLoopVars,
+                      ReductionDim::createSpatial(tensorType.getRank()));
+    // We can consolidate multiple inner loops into one induction variable.
+    result.innerLoopsAxes = mapVarsToAxes(
+        b,
+        llvm::map_to_vector(
+            innerLoopNest.tensorShape,
+            [&](int64_t extent) {
+              return tvm::utils::getConstantOpI32(b, loc, extent).getResult();
+            }),
+        innerLoopNest.tensorIndices, rDim);
+    result.mapper.map(outerLoopVars, outerLoopsAxes);
+  });
 
   // Do not forget to apply bufferization.to_tensor.
   return result;
@@ -391,8 +480,9 @@ void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
   // 1. Allocate buffer (and apply bufferization.to_tensor later).
   auto buffer = allocateBuffer(b, loc, tensorType);
 
-  auto computation = computeTensor(b, loc, tensorType);
-  auto &[block, mapper, innerLoopsAxes] = computation;
+  auto computation = computeTensor(
+      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()));
+  auto &[block, mapper, _, innerLoopsAxes] = computation;
 
   {
     // Enter the block.
@@ -402,7 +492,7 @@ void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
 
     // 4. Copy tensor.generate contents.
     auto rhs =
-        computation.inlineGenerator(b, tensor, innerLoopsAxesAsIndexType)[0];
+        computation.inlineFunction(b, tensor, innerLoopsAxesAsIndexType)[0];
 
     // 5. tvm.write and tvm.assign the tensor.
     auto lhs = computation.getDest(b, loc, buffer);
@@ -411,8 +501,7 @@ void materializeIntermediateTensor(OpBuilder &b, tensor::GenerateOp tensor) {
   }
 
   // 6. bufferization.to_tensor
-  auto unbufferized =
-      b.create<bufferization::ToTensorOp>(loc, buffer, b.getUnitAttr());
+  auto unbufferized = b.create<ttm::MemRefToTensorOp>(loc, tensorType, buffer);
   tensor->replaceAllUsesWith(unbufferized->getResults());
 }
 
@@ -423,8 +512,9 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   // 1. Allocate buffer (and apply bufferization.to_tensor later).
   auto buffer = allocateBuffer(b, loc, tensorType);
 
-  auto computation = computeTensor(b, loc, tensorType);
-  auto &[block, mapper, innerLoopsAxes] = computation;
+  auto computation = computeTensor(
+      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()));
+  auto &[block, mapper, _, innerLoopsAxes] = computation;
 
   {
     // Enter the block.
@@ -436,8 +526,8 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
         cast<tensor::GenerateOp>(load.getPtr().getDefiningOp());
 
     // 4. Copy tensor.generate contents.
-    auto ptr = computation.inlineGenerator(b, ptrGeneratorOp,
-                                           innerLoopsAxesAsIndexType)[0];
+    auto ptr = computation.inlineFunction(b, ptrGeneratorOp,
+                                          innerLoopsAxesAsIndexType)[0];
 
     // In the previous pass, we have already eliminated pointer arithmetic. Now
     // we have a memref with indices.
@@ -456,10 +546,10 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
           cast<tensor::GenerateOp>(load.getMask().getDefiningOp());
       auto otherGeneratorOp =
           cast<tensor::GenerateOp>(load.getOther().getDefiningOp());
-      auto mask = computation.inlineGenerator(b, maskGeneratorOp,
+      auto mask = computation.inlineFunction(b, maskGeneratorOp,
+                                             innerLoopsAxesAsIndexType)[0];
+      auto other = computation.inlineFunction(b, otherGeneratorOp,
                                               innerLoopsAxesAsIndexType)[0];
-      auto other = computation.inlineGenerator(b, otherGeneratorOp,
-                                               innerLoopsAxesAsIndexType)[0];
       rhs = b.create<tvm::IfThenElseOp>(loc, mask, rhs, other);
     }
 
@@ -470,8 +560,7 @@ void materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
   }
 
   // 6. bufferization.to_tensor
-  auto unbufferized =
-      b.create<bufferization::ToTensorOp>(loc, buffer, b.getUnitAttr());
+  auto unbufferized = b.create<ttm::MemRefToTensorOp>(loc, tensorType, buffer);
   load->replaceAllUsesWith(unbufferized->getResults());
 
   // Remove the load.
@@ -485,8 +574,9 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
   // 1. No need to allocate buffer, because we materialize into a destination
   // parameter.
 
-  auto computation = computeTensor(b, loc, tensorType);
-  auto &[block, mapper, innerLoopsAxes] = computation;
+  auto computation = computeTensor(
+      b, loc, tensorType, ReductionDim::createSpatial(tensorType.getRank()));
+  auto &[block, mapper, _, innerLoopsAxes] = computation;
 
   {
     // Enter the block.
@@ -500,8 +590,8 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
         cast<tensor::GenerateOp>(store.getPtr().getDefiningOp());
 
     // 4. Copy tensor.generate contents.
-    auto ptr = computation.inlineGenerator(b, ptrGeneratorOp,
-                                           innerLoopsAxesAsIndexType)[0];
+    auto ptr = computation.inlineFunction(b, ptrGeneratorOp,
+                                          innerLoopsAxesAsIndexType)[0];
 
     // Similar to load, we have a memref
     auto lhsMemRefPtr = ptr.getDefiningOp<ttm::MemRefToPtrOp>();
@@ -515,8 +605,8 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
           cast<tensor::GenerateOp>(store.getMask().getDefiningOp());
       // Note that here is a bit different, because in tvm.where we do not use
       // axes, but indices.
-      auto mask = computation.inlineGenerator(b, maskGeneratorOp,
-                                              innerLoopsIndicesAsIndexType)[0];
+      auto mask = computation.inlineFunction(b, maskGeneratorOp,
+                                             innerLoopsIndicesAsIndexType)[0];
       b.create<tvm::WhereOp>(loc, mask);
     }
 
@@ -533,6 +623,103 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
 
   // Remove the store.
   store->erase();
+}
+
+void materializeReduceOp(OpBuilder &b, triton::ReduceOp reduce) {
+  assert(reduce.getNumOperands() == 1 && "expected single operand to reduce");
+  auto input = reduce.getOperand(0);
+  auto inputType = cast<RankedTensorType>(input.getType());
+  auto scalarType = inputType.getElementType();
+  auto resultType = reduce.getResultTypes()[0];
+  auto loc = reduce.getLoc();
+
+  // Consider that the result type may be a scalar. This inconsistency sucks.
+  bool isResultScalar = !isa<RankedTensorType>(resultType);
+  RankedTensorType resultTensorType;
+  if (isResultScalar) {
+    [[maybe_unused]] auto encoding =
+        b.getAttr<triton::gpu::BlockedEncodingAttr>(
+            ArrayRef<unsigned>{}, ArrayRef<unsigned>{}, ArrayRef<unsigned>{},
+            ArrayRef<unsigned>{},
+            triton::gpu::CTALayoutAttr::getDefault(b.getContext(), 0));
+    resultTensorType = RankedTensorType::get({}, resultType, encoding);
+  } else {
+    resultTensorType = cast<RankedTensorType>(resultType);
+  }
+
+  // We do not support general reductions, because Triton implements reduction
+  // as intra-warp operation, where no identity is needed. So we have to match
+  // the reduction function and find the identity.
+  auto reductionOps =
+      llvm::map_to_vector(reduce.getBody()->without_terminator(),
+                          [&](Operation &op) { return &op; });
+  assert(reductionOps.size() == 1 &&
+         "expected single reduction op in tt.reduce");
+  auto *reductionOp = reductionOps.front();
+  auto identity =
+      llvm::TypeSwitch<Operation *, Value>(reductionOp)
+          .Case([&](arith::AddFOp) {
+            return arith::ConstantOp::materialize(
+                b, b.getFloatAttr(scalarType, 0.0f), scalarType, loc);
+          })
+          .Case([&](arith::AddIOp) {
+            return arith::ConstantOp::materialize(
+                b, b.getIntegerAttr(scalarType, 0), scalarType, loc);
+          })
+          .Case<arith::MaximumFOp, arith::MaxNumFOp, arith::MaxSIOp,
+                arith::MaxUIOp>(
+              [&](auto) { return b.create<tvm::MinValueOp>(loc, scalarType); })
+          .Case<arith::MinimumFOp, arith::MinNumFOp, arith::MinSIOp,
+                arith::MinUIOp>(
+              [&](auto) { return b.create<tvm::MaxValueOp>(loc, scalarType); })
+          .Default([&](Operation *) {
+            llvm_unreachable("This reduction is not supported");
+            return nullptr;
+          });
+
+  // 1. Allocate buffer (and apply bufferization.to_tensor later).
+  auto buffer = allocateBuffer(b, loc, resultTensorType);
+
+  auto computation = computeTensor(
+      b, loc, inputType,
+      ReductionDim::createReduction(inputType.getRank(), reduce.getAxis()));
+  auto &[block, mapper, rDim, innerLoopsAxes] = computation;
+
+  {
+    // Enter the block.
+    auto guard = computation.enterBlock(b);
+    auto innerLoopsAxesAsIndexType =
+        computation.getInnerLoopsAxesAsIndexType(b);
+
+    auto acc = computation.getDest(b, loc, buffer);
+
+    // 5. tvm.write
+    b.create<tvm::WriteOp>(loc, ValueRange{acc});
+
+    // Insert init block.
+    b.create<tvm::InitOp>(loc, [&](OpBuilder &b, Location loc) {
+      b.create<tvm::AssignOp>(loc, acc, identity);
+    });
+
+    // 4. Copy reduce op contents.
+    auto cur =
+        b.create<tensor::ExtractOp>(loc, input, innerLoopsAxesAsIndexType);
+    auto rhs = computation.inlineFunction(b, reduce, {acc, cur})[0];
+
+    // 5. tvm.assign
+    b.create<tvm::AssignOp>(loc, acc, rhs);
+  }
+
+  // 6. bufferization.to_tensor
+  auto unbufferized =
+      b.create<ttm::MemRefToTensorOp>(loc, resultTensorType, buffer);
+  // if the result is scalar, we have to extract the value.
+  if (isResultScalar) {
+    auto scalar = b.create<tensor::ExtractOp>(loc, unbufferized, ValueRange{});
+    reduce->replaceAllUsesWith(scalar->getResults());
+  } else {
+    reduce->replaceAllUsesWith(unbufferized->getResults());
+  }
 }
 
 } // namespace
@@ -594,6 +781,11 @@ public:
       OpBuilder builder(&getContext());
       builder.setInsertionPointAfter(store);
       materializeStoreOp(builder, store);
+    });
+    moduleOp.walk([&](triton::ReduceOp reduce) {
+      OpBuilder builder(&getContext());
+      builder.setInsertionPointAfter(reduce);
+      materializeReduceOp(builder, reduce);
     });
   }
 };

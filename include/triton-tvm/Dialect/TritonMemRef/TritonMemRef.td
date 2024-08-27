@@ -52,4 +52,42 @@ def TritonMemRef_MemRefToPtrOp : Op<
 
 }
 
+def TritonMemRef_MemRefToTensorOp : Op<
+  TritonMemRef_Dialect,
+  "memref_to_tensor",
+  [
+    SameOperandsAndResultShape,
+    SameOperandsAndResultElementType,
+  ]
+> {
+
+  let summary = "Converts a memref to a tensor.";
+
+  let description = [{
+    bufferization.to_tensor imposes too strong requirements on the result tensor,
+    that it cannot keep any encoding attributes. This op relaxes such requirements.
+  }];
+
+  let arguments = (ins Arg<AnyRankedOrUnrankedMemRef,
+                          "the reference to load from",
+                          [MemReadAt<0, FullEffect>]>:$memref);
+
+  let results = (outs AnyTensor:$result);
+
+  let extraClassDeclaration = [{
+    /// The result is always a tensor.
+    TensorType getType() {
+      Type resultType = getResult().getType();
+      if (::llvm::isa<TensorType>(resultType))
+        return ::llvm::cast<TensorType>(resultType);
+      return {};
+    }
+  }];
+
+  let assemblyFormat = [{
+    $memref attr-dict `:` type($memref) `to` type($result)
+  }];
+
+}
+
 #endif // TRITON_MEMREF_DIALECT

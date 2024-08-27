@@ -346,4 +346,46 @@ def TVM_InitOp : TVM_Op<"init", [
 
 }
 
+def TVM_MinValueOp : TVM_Op<"min_value", [Pure]> {
+
+  let summary = "Equivalent to T.min_value in TVM TensorIR.";
+
+  let description = [{
+    Returns the minimum value of the type.
+
+    Example:
+    ```mlir
+      %3 = tvm.min_value : f32
+    ```
+  }];
+
+  let arguments = (ins);
+
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+
+}
+
+def TVM_MaxValueOp : TVM_Op<"max_value", [Pure]> {
+
+  let summary = "Equivalent to T.max_value in TVM TensorIR.";
+
+  let description = [{
+    Returns the maximum value of the type.
+
+    Example:
+    ```mlir
+      %4 = tvm.max_value : f32
+    ```
+  }];
+
+  let arguments = (ins);
+
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = "attr-dict `:` type($result)";
+
+}
+
 #endif
