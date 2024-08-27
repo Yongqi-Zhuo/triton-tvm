@@ -56,6 +56,7 @@ def TritonMemRef_MemRefToTensorOp : Op<
   TritonMemRef_Dialect,
   "memref_to_tensor",
   [
+    Pure,
     SameOperandsAndResultShape,
     SameOperandsAndResultElementType,
   ]
@@ -74,6 +75,14 @@ def TritonMemRef_MemRefToTensorOp : Op<
 
   let assemblyFormat = [{
     $memref attr-dict `:` type($memref) `to` type($result)
+  }];
+
+  let extraClassDeclaration = [{
+    Value getMemRef() { return getOperand(); }
+    void setMemRef(Value value) { setOperand(value); }
+    MemRefType getMemRefType() {
+      return ::llvm::cast<MemRefType>(getMemRef().getType());
+    }
   }];
 
 }

@@ -1,3 +1,4 @@
+#include "mlir/Analysis/SliceAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -289,19 +290,13 @@ SmallVector<scf::ForOp> collectLoopsInScope(OpBuilder &b) {
 
 SmallVector<Value>
 getInductionVarsFromLoopNest(SmallVectorImpl<scf::ForOp> &loops) {
-  SmallVector<Value> inductionVars;
-  for (auto loop : loops) {
-    inductionVars.push_back(loop.getInductionVar());
-  }
-  return inductionVars;
+  return llvm::map_to_vector(
+      loops, [](scf::ForOp loop) { return loop.getInductionVar(); });
 }
 
 SmallVector<Value> getExtentsFromLoopNest(SmallVectorImpl<scf::ForOp> &loops) {
-  SmallVector<Value> extents;
-  for (auto loop : loops) {
-    extents.push_back(loop.getUpperBound());
-  }
-  return extents;
+  return llvm::map_to_vector(
+      loops, [](scf::ForOp loop) { return loop.getUpperBound(); });
 }
 
 SmallVector<Value> mapVarsToAxes(OpBuilder &b, ValueRange extents,
@@ -389,12 +384,19 @@ struct Computation {
 
   static SmallVector<Value> getArrayAsIndexType(OpBuilder &b,
                                                 ValueRange array) {
-    SmallVector<Value> arrayAsIndexType;
-    for (auto value : array) {
-      arrayAsIndexType.push_back(b.create<arith::IndexCastOp>(
-          value.getLoc(), b.getIndexType(), value));
-    }
-    return arrayAsIndexType;
+    auto type = b.getIndexType();
+    return llvm::map_to_vector(array, [&](Value value) {
+      return b.create<arith::IndexCastOp>(value.getLoc(), type, value)
+          .getResult();
+    });
+  }
+
+  static SmallVector<Value> getIndexArrayAsType(OpBuilder &b, ValueRange array,
+                                                Type type) {
+    return llvm::map_to_vector(array, [&](Value value) {
+      return b.create<arith::IndexCastOp>(value.getLoc(), type, value)
+          .getResult();
+    });
   }
 
   // Because we currently uses i32 as indices, we have to cast innerLoopsAxes to
@@ -406,11 +408,9 @@ struct Computation {
   // We simply return the indices wrapped in the axes. This can be used in
   // tvm.where statements.
   SmallVector<Value> getInnerLoopsIndices() const {
-    SmallVector<Value> indices;
-    for (auto axis : innerLoopsAxes) {
-      indices.push_back(axis.getDefiningOp<tvm::AxisOp>().getBinding());
-    }
-    return indices;
+    return llvm::map_to_vector(innerLoopsAxes, [](Value axis) {
+      return static_cast<Value>(axis.getDefiningOp<tvm::AxisOp>().getBinding());
+    });
   }
 
   SmallVector<Value> getInnerLoopsIndicesAsIndexType(OpBuilder &b) const {
@@ -758,8 +758,6 @@ struct ReduceOpConverter : public OpConversionPattern<triton::ReduceOp> {
   }
 };
 
-void readBlockOpProducers(tvm::BlockOp blockOp) {}
-
 } // namespace
 
 class MaterializeTensorsToTVMBuffers
@@ -854,7 +852,50 @@ public:
 
   void readProducers() {
     auto moduleOp = getOperation();
-    moduleOp.walk([&](tvm::BlockOp blockOp) { readBlockOpProducers(blockOp); });
+
+    // For each consumer BlockOp, collect the producers.
+    DenseMap<tvm::BlockOp, SmallVector<Value>> producers;
+
+    // Each producer is a tensor.extract.
+    moduleOp.walk([&](tensor::ExtractOp extractOp) {
+      auto memrefBackedTensor =
+          extractOp.getTensor().getDefiningOp<ttm::MemRefToTensorOp>();
+      assert(memrefBackedTensor &&
+             "Expected all tensors to be results of memref_to_tensor");
+
+      // Compute the consumers. All consumers are in the forward slice.
+      SetVector<Operation *> slice;
+      getForwardSlice(extractOp.getOperation(), &slice);
+      IRRewriter rewriter(extractOp);
+      // Note that we have to cast the indices to i32.
+      auto indices = Computation::getIndexArrayAsType(
+          rewriter, extractOp.getIndices(), rewriter.getI32Type());
+
+      // Now that the slice is collected, we can erase the extract op, and
+      // replace with standard tvm.ref, which has no consumer/producer
+      // information.
+      auto refOp = rewriter.create<tvm::RefOp>(
+          extractOp.getLoc(), memrefBackedTensor.getMemRef(), indices);
+      rewriter.replaceOp(extractOp, refOp);
+
+      // For each corresponding BlockOp, add its producer.
+      for (auto *op : slice) {
+        if (auto assignOp = dyn_cast<tvm::AssignOp>(op)) {
+          producers[assignOp.getBlockOp()].push_back(refOp);
+        }
+      }
+    });
+
+    // Then add tvm.read directives for the producers.
+    moduleOp.walk([&](tvm::BlockOp blockOp) {
+      if (auto it = producers.find(blockOp); it != producers.end()) {
+        auto &refs = it->second;
+        auto assignOp = blockOp.getAssignOp();
+        assert(!blockOp.getReadOp() && "Expected no existing read op.");
+        OpBuilder b(assignOp);
+        b.create<tvm::ReadOp>(assignOp.getLoc(), refs);
+      }
+    });
   }
 };
 

@@ -318,6 +318,10 @@ def TVM_AssignOp : TVM_Op<"assign", [
 
   let assemblyFormat = "attr-dict $lhs `=` $rhs `:` type($lhs)";
 
+  let extraClassDeclaration = [{
+    BlockOp getBlockOp();
+  }];
+
 }
 
 def TVM_InitOp : TVM_Op<"init", [

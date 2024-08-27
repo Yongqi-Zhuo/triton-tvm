@@ -56,6 +56,14 @@ InitOp BlockOp::getInitOp() {
   return nullptr;
 }
 
+BlockOp AssignOp::getBlockOp() {
+  auto *parent = getOperation()->getParentOp();
+  if (isa<InitOp>(parent)) {
+    parent = parent->getParentOp();
+  }
+  return cast<BlockOp>(parent);
+}
+
 void InitOp::build(OpBuilder &builder, OperationState &result,
                    function_ref<void(OpBuilder &, Location)> bodyBuilder) {
   OpBuilder::InsertionGuard guard(builder);
