@@ -20,7 +20,7 @@ def TVM_AxisKind : I32EnumAttr<
   "AxisKind", "",
   [
     I32EnumAttrCase<"SPATIAL", 0, "spatial">,
-    I32EnumAttrCase<"REDUCTION", 1, "reduction">,
+    I32EnumAttrCase<"REDUCE", 1, "reduce">,
     I32EnumAttrCase<"SCAN", 2, "scan">,
     I32EnumAttrCase<"OPAQUE", 3, "opaque">,
   ]> {

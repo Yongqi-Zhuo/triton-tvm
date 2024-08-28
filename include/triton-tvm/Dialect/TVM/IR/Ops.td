@@ -88,6 +88,7 @@ def TVM_AllocBufferOp : TVM_Op<"alloc_buffer"> {
     ```
   }];
 
+  // TODO: Add dynamic shape.
   let arguments = (ins StrAttr:$scope);
 
   let results = (outs Res<AnyMemRef, "",

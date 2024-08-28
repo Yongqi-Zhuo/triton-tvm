@@ -134,7 +134,7 @@ public:
     pm.addPass(createCSEPass());
     pm.addPass(createLoopInvariantCodeMotionPass());
     // TODO: move this to Python.
-    // pm.addPass(tvm::createConvertToTVMScript({"output.py"}));
+    pm.addPass(tvm::createConvertToTVMScript({"output.py"}));
     if (failed(runPipeline(pm, moduleOp))) {
       signalPassFailure();
     }

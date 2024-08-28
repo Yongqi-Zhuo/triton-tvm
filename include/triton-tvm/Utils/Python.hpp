@@ -1,58 +1,73 @@
 #pragma once
 
-#include <functional>
-#include <ostream>
-
-#include <fmt/format.h>
+#include "mlir/Support/LLVM.h"
+#include "llvm/Support/FormatVariadic.h"
 
 namespace mlir::tvm {
 
-template <typename _CharT, typename _Traits>
 class PythonCodePrinter {
-  std::basic_ostream<_CharT, _Traits> &oss;
+  llvm::raw_ostream &os;
   bool isNewLine = true;
   std::size_t indentLevel;
-  void writeIndent() {
+
+  inline void writeIndent() {
     for (std::size_t i = 0; i < indentLevel; ++i)
-      oss << '\t';
+      os << '\t';
   }
 
 public:
+  PythonCodePrinter(llvm::raw_ostream &os, std::size_t indentLevel)
+      : os{os}, indentLevel{indentLevel} {}
   template <typename F>
-  void indent(F &&f) {
+  inline void indent(F &&f) {
     const std::size_t oldIndentLevel = indentLevel++;
-    std::invoke(f);
+    std::invoke(std::forward<F>(f));
     indentLevel = oldIndentLevel;
   };
-  template <bool CommaAndNewLine = false, typename F>
-  void parens(F &&f) {
-    writeLn("(");
-    indent(std::forward<F>(f));
-    if constexpr (CommaAndNewLine) {
-      writeLn("),");
-    } else {
-      write(")");
-    }
+  template <typename... Fs>
+  inline void join(Fs &&...fs) {
+    const char *separator = "";
+    ((writeRaw(separator), std::invoke(std::forward<Fs>(fs)), separator = ", "),
+     ...);
+  }
+  template <typename... Fs>
+  inline void parens(Fs &&...fs) {
+    writeRaw("(");
+    join(std::forward<Fs>(fs)...);
+    writeRaw(")");
   };
-  PythonCodePrinter(std::basic_ostream<_CharT, _Traits> &oss,
-                    std::size_t indentLevel)
-      : oss{oss}, indentLevel{indentLevel} {}
+  template <typename... Fs>
+  inline void brackets(Fs &&...fs) {
+    writeRaw("[");
+    join(std::forward<Fs>(fs)...);
+    writeRaw("]");
+  };
   template <typename... Args>
-  void write(fmt::format_string<Args...> format, Args &&...args) {
+  inline void write(const char *format, Args &&...args) {
     if (isNewLine) {
       writeIndent();
       isNewLine = false;
     }
-    fmt::format_to(std::ostreambuf_iterator(oss), format,
-                   std::forward<Args>(args)...);
+    llvm::formatv(format, std::forward<Args>(args)...).format(os);
   }
-  void writeLn() {
-    oss << "\n";
+  inline void writeLn() {
+    os << "\n";
     isNewLine = true;
   }
   template <typename... Args>
-  void writeLn(fmt::format_string<Args...> format, Args &&...args) {
+  inline void writeLn(const char *format, Args &&...args) {
     write(format, std::forward<Args>(args)...);
+    writeLn();
+  }
+  inline void writeRaw(StringRef str) {
+    if (isNewLine) {
+      writeIndent();
+      isNewLine = false;
+    }
+    os << str;
+  }
+  inline void writeRawLn(StringRef str) {
+    writeRaw(str);
     writeLn();
   }
 };

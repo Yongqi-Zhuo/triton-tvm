@@ -16,7 +16,7 @@ An MLIR dialect for TVM TensorIR is devised.
 | `T.alloc_buffer` | `tvm.alloc_buffer` | |
 | `T.block` | `tvm.block` | |
 | `T.where` | `tvm.where` | |
-| `T.axis.spatial(k)` | `tvm.axis spatial %k` | `spatial`, `reduction`, `scan`, `opaque` |
+| `T.axis.spatial(k)` | `tvm.axis spatial %k` | `spatial`, `reduce`, `scan`, `opaque` |
 | `A[i, j]` | `tvm.ref %A[%i, %j]` | |
 | `T.if_then_else` | `tvm.if_then_else` | |
 | `T.reads` | `tvm.read` | |
@@ -40,4 +40,4 @@ Basically, by pattern matching.
 | `arith.*` | Do NOT materialze. Keep in the form. |
 | `for k: ...` | `scf.for {tvm.for_kind = serial}` |
 | `for k: ptrs += stride` | `ptrs = offset + k * stride` |
-| `for k: acc += ...` | Materialize with `tvm.block`, with `tvm.axis reduction k` |
+| `for k: acc += ...` | Materialize with `tvm.block`, with `tvm.axis reduce k` |

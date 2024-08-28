@@ -887,10 +887,10 @@ public:
     // ** For each kind of computation,
     //    - tt.load & tt.store. Extract from ttm.memref_to_ptr memref and
     //      indices. Use tvm.if_then_else and tvm.where for guards.
-    //    - tt.reduce. Note that we have to use tvm.axis reduction and tvm.init.
+    //    - tt.reduce. Note that we have to use tvm.axis reduce and tvm.init.
     //      Note that there may be scalar output, so we have to also convert
     //      that to a tensor.
-    //    - tt.dot. Also tvm.axis reduction.
+    //    - tt.dot. Also tvm.axis reduce.
     //    - Others. All tensor.generate. Note that we can reject materializing
     //      pointer tensors for the time being, because we choose not to support
     //      indirection.

@@ -3,9 +3,6 @@ option(TRITON_TVM_BUILD_BACKEND "Build triton-tvm backend" ON)
 set(TRITON_TVM_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(TRITON_TVM_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}")
 
-find_package(fmt REQUIRED)
-link_libraries(fmt::fmt-header-only)
-
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include) # Tablegen'd files
 add_subdirectory(include)
