@@ -45,7 +45,6 @@ class TVMUtils(object):
           "mem_bus_width": None
         }
 
-    # Dummy.
     @staticmethod
     def load_binary(name, kernel_asm, shared, device):
         tvmscript = kernel_asm.decode("utf-8")
@@ -65,7 +64,7 @@ class TVMUtils(object):
             prim_func = mod.Module[name]
             wrapped = tvm.contrib.torch.as_torch(prim_func)
         return (
-          None,       # module
+          mod_name,   # module
           wrapped,    # TVM PackedFunc
           None,       # n_regs
           None        # n_spills

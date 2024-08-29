@@ -46,26 +46,6 @@ public:
     const auto &tensorShapes = stolenDims.tensorShapes;
     const auto &tensorStrides = stolenDims.tensorStrides;
 
-    llvm::errs() << "gridDim { ";
-    for (int dim : gridDim) {
-      llvm::errs() << dim << ", ";
-    }
-    llvm::errs() << "}\n";
-    for (const auto &sizes : tensorShapes) {
-      llvm::errs() << "sizes { ";
-      for (int size : sizes) {
-        llvm::errs() << size << ", ";
-      }
-      llvm::errs() << "}\n";
-    }
-    for (const auto &strides : tensorStrides) {
-      llvm::errs() << "strides { ";
-      for (int stride : strides) {
-        llvm::errs() << stride << ", ";
-      }
-      llvm::errs() << "}\n";
-    }
-
     moduleOp.walk([&](triton::FuncOp func) {
       // Make sure all integer parameters are constants, because we currently
       // only support constant integer values.
