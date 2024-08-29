@@ -149,7 +149,7 @@ struct UseMemRefInAddPtrConverter
     // Here, the function argument is already converted to a memref<*x?>.
     // Use ttm.memref_to_ptr %memref[%offset0, %offset1, ...] to perform
     // indexing. To do this, we delinearize the offset.
-    auto indices = tvm::utils::delinearizeIndex(
+    auto indices = tvm::utils::delinearizeIndexWithStrides(
         rewriter, op->getLoc(), adaptor.getOffset(),
         cast<StridedLayoutAttr>(memrefType.getLayout()).getStrides());
     auto newPtr = rewriter.create<ttm::MemRefToPtrOp>(

@@ -142,9 +142,12 @@ public:
                         .prec = PyExpr::CALL};
         })
         .Case<FloatAttr>([&](FloatAttr floatAttr) {
-          return PyExpr{.str = llvm::formatv(
-                            "T.{0}({1})", typeNames.get(floatAttr.getType()),
-                            floatAttr.getValue().convertToDouble()),
+          assert(!floatAttr.getValue().isNaN());
+          assert(!floatAttr.getValue().isInfinity() &&
+                 "infinity should be handled by convertInfinity()");
+          return PyExpr{.str = llvm::formatv("T.{0}({1})",
+                                             typeNames.get(floatAttr.getType()),
+                                             floatAttr.getValueAsDouble()),
                         .prec = PyExpr::CALL};
         })
         .Case<StringAttr>([&](StringAttr strAttr) {
@@ -285,6 +288,22 @@ public:
     return it->second;
   }
 };
+
+LogicalResult convertInfinityConstant(arith::ConstantOp op,
+                                      PatternRewriter &rewriter) {
+  auto attr = dyn_cast<FloatAttr>(op.getValue());
+  if (!attr)
+    return failure();
+  auto value = attr.getValue();
+  if (value.isPosInfinity()) {
+    rewriter.replaceOpWithNewOp<tvm::MaxValueOp>(op, op.getType());
+  } else if (value.isNegInfinity()) {
+    rewriter.replaceOpWithNewOp<tvm::MinValueOp>(op, op.getType());
+  } else {
+    return failure();
+  }
+  return success();
+}
 
 } // namespace
 
@@ -518,7 +537,19 @@ class ConvertToTVMScriptPass
 public:
   using ConvertToTVMScriptBase<ConvertToTVMScriptPass>::ConvertToTVMScriptBase;
 
+  // Replace infinity constants with tvm.min_value and tvm.max_value.
+  void replaceInfinity() {
+    RewritePatternSet patterns(&getContext());
+    patterns.add(convertInfinityConstant);
+    if (failed(applyPatternsAndFoldGreedily(getOperation(),
+                                            std::move(patterns)))) {
+      signalPassFailure();
+    }
+  }
+
   void runOnOperation() override {
+    replaceInfinity();
+
     auto moduleOp = getOperation();
 
     typeNames.emplace(&getContext());

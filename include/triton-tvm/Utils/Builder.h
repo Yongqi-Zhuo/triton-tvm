@@ -19,9 +19,9 @@ inline arith::ConstantOp getConstantOpIndex(OpBuilder &builder, Location loc,
                                         builder.getIndexType(), loc);
 }
 
-inline SmallVector<Value> delinearizeIndex(OpBuilder &b, Location loc,
-                                           Value linearIndex,
-                                           ArrayRef<int64_t> strides) {
+inline SmallVector<Value>
+delinearizeIndexWithStrides(OpBuilder &b, Location loc, Value linearIndex,
+                            ArrayRef<int64_t> strides) {
   unsigned numDims = strides.size();
   assert(numDims > 0 && "expected at least one dimension");
   assert(std::is_sorted(strides.rbegin(), strides.rend()) &&
@@ -45,6 +45,20 @@ inline SmallVector<Value> delinearizeIndex(OpBuilder &b, Location loc,
     residual = remainder;
   }
   return results;
+}
+
+inline SmallVector<Value> delinearizeIndexWithSizes(OpBuilder &b, Location loc,
+                                                    Value linearIndex,
+                                                    ArrayRef<int64_t> sizes) {
+  SmallVector<int64_t> strides;
+  strides.reserve(sizes.size());
+  int64_t stride = 1;
+  for (auto size : llvm::reverse(sizes)) {
+    strides.push_back(stride);
+    stride *= size;
+  }
+  std::reverse(strides.begin(), strides.end());
+  return delinearizeIndexWithStrides(b, loc, linearIndex, strides);
 }
 
 } // namespace mlir::tvm::utils

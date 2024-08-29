@@ -38,37 +38,47 @@ namespace mlir::triton {
 
 namespace {
 
-// blockIdx has been bound to the loop induction var
-enum class ThreadBinding {
-  THREAD_IDX_X,
-  THREAD_IDX_Y,
-  THREAD_IDX_Z,
-};
-StringAttr threadBindingToAttr(OpBuilder &b, ThreadBinding binding) {
-  switch (binding) {
-  case ThreadBinding::THREAD_IDX_X:
-    return b.getStringAttr("threadIdx.x");
-  case ThreadBinding::THREAD_IDX_Y:
-    return b.getStringAttr("threadIdx.y");
-  case ThreadBinding::THREAD_IDX_Z:
-    return b.getStringAttr("threadIdx.z");
-  default:
-    llvm_unreachable("unexpected thread binding");
-  }
-}
-std::optional<StringAttr>
-threadBindingToAttr(OpBuilder &b, std::optional<ThreadBinding> binding) {
-  if (binding)
-    return threadBindingToAttr(b, *binding);
-  return std::nullopt;
-}
-
 struct LoopSpec {
-  unsigned extent;
+  struct Dim {
+    unsigned dim;
+    unsigned extent;
+  };
   tvm::ForKind kind;
-  std::optional<ThreadBinding> thread;
   // Auxiliary
-  unsigned dim;
+  SmallVector<Dim> dims;
+  unsigned extent() const {
+    return std::accumulate(
+        dims.begin(), dims.end(), 1u,
+        [](unsigned acc, const Dim &dim) { return acc * dim.extent; });
+  }
+};
+
+class LoopsBuilder {
+  SmallVector<LoopSpec> specs;
+
+public:
+  LoopsBuilder &add(tvm::ForKind kind, unsigned dim, unsigned extent) {
+    if (extent <= 1) {
+      return *this;
+    }
+    if (!specs.empty() && specs.back().kind == kind) {
+      // Possible to fuse the two loops.
+      auto &last = specs.back();
+      if (last.dims.back().dim == dim) {
+        // Same dimension, so can be fused.
+        last.dims.back().extent *= extent;
+        return *this;
+      }
+      if (kind == tvm::ForKind::THREAD_BINDING) {
+        // We should always use a single thread binding.
+        last.dims.push_back({dim, extent});
+        return *this;
+      }
+    }
+    specs.push_back({kind, {{dim, extent}}});
+    return *this;
+  }
+  SmallVector<LoopSpec> build() { return std::move(specs); }
 };
 
 SmallVector<scf::ForOp> generateLoopNestFromSpecs(OpBuilder &b, Location loc,
@@ -77,10 +87,14 @@ SmallVector<scf::ForOp> generateLoopNestFromSpecs(OpBuilder &b, Location loc,
   if (specs.empty())
     return loops;
   auto zero = tvm::utils::getConstantOpI32(b, loc, 0);
-  for (const auto &[extent, kind, thread, _] : specs) {
+  for (const auto &spec : specs) {
+    const auto &[kind, dims] = spec;
+    unsigned extent = spec.extent();
     auto loop = tvm::ForOp::create(
         b, loc, zero, tvm::utils::getConstantOpI32(b, loc, extent),
-        b.getAttr<tvm::ForKindAttr>(kind), threadBindingToAttr(b, thread));
+        b.getAttr<tvm::ForKindAttr>(kind),
+        kind == tvm::ForKind::THREAD_BINDING ? b.getStringAttr("threadIdx.x")
+                                             : nullptr);
     loops.push_back(loop);
     b.setInsertionPointToStart(loop.getBody());
   }
@@ -157,21 +171,23 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
       cast<triton::gpu::BlockedEncodingAttr>(tensor.getEncoding());
   // Ignore Hopper. CGA size is always 1.
 
-  SmallVector<LoopSpec> specs;
+  LoopsBuilder specsBuilder;
 
   // Here is our loop nest:
   // for warpsPerCTA[order[r-1]]:
   //  ...
-  //   for warpsPerBlock[order[0]]:
+  //   for warpsPerCTA[order[0]]:
   //    for threadsPerWarp[order[r-1]]:
   //     ...
-  //      for threadsPerBlock[order[0]]:
+  //      for threadsPerWarp[order[0]]:
   //       for shape[order[r-1]]/totalPerCTA[order[r-1]]: # unroll
   //        ...
-  //         for shape[order[0]]/totalPerBlock[order[0]]: # unroll
+  //         for shape[order[0]]/totalPerCTA[order[0]]: # unroll
   //          for sizePerThread[order[r-1]]:
   //           ...
   //            for sizePerThread[order[0]]: # vectorize
+  // Here, warpsPerCTA and threadsPerWarp are in a single loop, and we have to
+  // delinearize to get the tensor indices.
   enum Stage {
     STAGE_WARPS_PER_CTA = 0,
     STAGE_THREADS_PER_WARP,
@@ -188,8 +204,6 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
   if (rDim.isReduction()) {
     assert(layoutOrder[0] == rDim.get() &&
            "reduction dim must be the most contiguous dimension");
-    assert(layoutSizePerThread[rDim.get()] == 1 &&
-           "cannot vectorize a cross-thread reduction");
   }
 
   for (Stage stage = static_cast<Stage>(0); stage < STAGE_COUNT;
@@ -198,44 +212,43 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
     for (int order = static_cast<int>(layoutOrder.size()) - 1; order >= 0;
          --order) {
       unsigned dim = layoutOrder[order];
-      LoopSpec spec{0, tvm::ForKind::SERIAL, std::nullopt, dim};
+      unsigned extent = 0;
+      tvm::ForKind kind = tvm::ForKind::SERIAL;
       switch (stage) {
       case STAGE_WARPS_PER_CTA:
-        spec.extent = layoutWarpsPerCTA[dim];
-        spec.kind = tvm::ForKind::THREAD_BINDING;
-        spec.thread = ThreadBinding::THREAD_IDX_X;
+        extent = layoutWarpsPerCTA[dim];
+        kind = tvm::ForKind::THREAD_BINDING;
         break;
       case STAGE_THREADS_PER_WARP:
-        spec.extent = layoutThreadsPerWarp[dim];
-        spec.kind = tvm::ForKind::THREAD_BINDING;
-        spec.thread = ThreadBinding::THREAD_IDX_X;
+        extent = layoutThreadsPerWarp[dim];
+        kind = tvm::ForKind::THREAD_BINDING;
         break;
       case STAGE_CTA_TILE:
-        spec.extent = tensor.getDimSize(dim) /
-                      (layoutWarpsPerCTA[dim] * layoutThreadsPerWarp[dim] *
-                       layoutSizePerThread[dim]);
+        extent = tensor.getDimSize(dim) /
+                 (layoutWarpsPerCTA[dim] * layoutThreadsPerWarp[dim] *
+                  layoutSizePerThread[dim]);
         // TODO: Will this work?
-        spec.kind = rDim.match(tvm::ForKind::UNROLL, tvm::ForKind::SERIAL,
-                               tvm::ForKind::UNROLL);
+        kind = rDim.match(tvm::ForKind::UNROLL, tvm::ForKind::SERIAL,
+                          tvm::ForKind::UNROLL);
         break;
       case STAGE_SIZE_PER_THREAD:
-        spec.extent = layoutSizePerThread[dim];
-        spec.kind = rDim.match(order == 0 ? tvm::ForKind::VECTORIZED
-                                          : tvm::ForKind::UNROLL,
-                               tvm::ForKind::UNROLL, // unreachable
-                               tvm::ForKind::UNROLL);
+        extent = layoutSizePerThread[dim];
+        kind = rDim.match(order == 0 ? tvm::ForKind::VECTORIZED
+                                     : tvm::ForKind::UNROLL,
+                          tvm::ForKind::SERIAL, tvm::ForKind::UNROLL);
         break;
       default:
         llvm_unreachable("unexpected stage");
       }
-      if (spec.extent > 1)
-        specs.push_back(spec);
+      specsBuilder.add(kind, dim, extent);
     }
   }
   if (rDim.isContraction()) {
-    specs.push_back({rDim.getContractionExtent(), tvm::ForKind::SERIAL,
-                     std::nullopt, rDim.get()});
+    specsBuilder.add(tvm::ForKind::SERIAL, rDim.get(),
+                     rDim.getContractionExtent());
   }
+
+  auto specs = specsBuilder.build();
   auto loops = generateLoopNestFromSpecs(b, loc, specs);
 
   // Then recover the tensor indices.
@@ -246,20 +259,34 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
   SmallVector<Value> tensorIndices(tensor.getRank() + rDim.isContraction(),
                                    zero);
   SmallVector<unsigned> strides(tensor.getRank() + rDim.isContraction(), 1);
-  for (int forLoopId = static_cast<int>(specs.size()) - 1; forLoopId >= 0;
-       --forLoopId) {
-    Value inductionVar = loops[forLoopId].getInductionVar();
-    unsigned dim = specs[forLoopId].dim;
-    Value offset = b.create<arith::MulIOp>(
-        loc, inductionVar, tvm::utils::getConstantOpI32(b, loc, strides[dim]));
-    tensorIndices[dim] =
-        b.create<arith::AddIOp>(loc, tensorIndices[dim], offset);
-    strides[dim] *= specs[forLoopId].extent;
+  int64_t sanity = 1;
+  // The for loops.
+  for (const auto &[spec, loop] :
+       llvm::zip_equal(llvm::reverse(specs), llvm::reverse(loops))) {
+    const auto &[kind, dims] = spec;
+    auto innerExtents = llvm::map_to_vector(
+        dims, [](const auto &dim) { return static_cast<int64_t>(dim.extent); });
+    // Decompose each for loop into loops for individual dims.
+    auto innerVars = tvm::utils::delinearizeIndexWithSizes(
+        b, loc, loop.getInductionVar(), innerExtents);
+    for (const auto &[dim, var] :
+         llvm::zip_equal(llvm::reverse(dims), llvm::reverse(innerVars))) {
+      // Accumulate for individual dims.
+      Value offset = b.create<arith::MulIOp>(
+          loc, var, tvm::utils::getConstantOpI32(b, loc, strides[dim.dim]));
+      tensorIndices[dim.dim] =
+          b.create<arith::AddIOp>(loc, tensorIndices[dim.dim], offset);
+      strides[dim.dim] *= dim.extent;
+      sanity *= dim.extent;
+    }
   }
   SmallVector<int64_t> tensorShape(tensor.getShape());
   if (rDim.isContraction()) {
     tensorShape.push_back(rDim.getContractionExtent());
   }
+  assert(sanity == std::accumulate(tensorShape.begin(), tensorShape.end(), 1,
+                                   std::multiplies<int64_t>()) &&
+         "Number of elements mismatch");
   return LoopNest{std::move(loops), std::move(tensorIndices),
                   std::move(tensorShape)};
 }

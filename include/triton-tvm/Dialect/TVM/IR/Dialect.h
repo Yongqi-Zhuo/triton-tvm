@@ -38,7 +38,7 @@ struct ForOp {
   // Forward params to scf::ForOp, and add attributes.
   static inline scf::ForOp create(
       OpBuilder &builder, Location loc, Value lowerBound, Value upperBound,
-      ForKindAttr kind, std::optional<StringAttr> thread = std::nullopt,
+      ForKindAttr kind, StringAttr thread = nullptr,
       function_ref<void(OpBuilder &, Location, Value)> bodyBuilder = nullptr) {
     auto iterType = lowerBound.getType();
     auto c1 = arith::ConstantOp::materialize(
@@ -52,7 +52,7 @@ struct ForOp {
         } : scf::ForOp::BodyBuilderFn{});
     op->setAttr(builder.getStringAttr(kAttrForKindName), kind);
     if (thread) {
-      op->setAttr(builder.getStringAttr(tvm::kAttrForThreadName), *thread);
+      op->setAttr(builder.getStringAttr(tvm::kAttrForThreadName), thread);
     }
     return op;
   }
