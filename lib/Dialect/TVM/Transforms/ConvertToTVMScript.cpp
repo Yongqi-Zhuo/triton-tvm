@@ -64,6 +64,23 @@ struct PyExpr {
     return {.str = std::move(value), .prec = ATOM};
   }
 
+  static PyExpr literal(StringRef value) {
+    std::string ret;
+    llvm::raw_string_ostream os(ret);
+    os << '"';
+    os.write_escaped(value);
+    os << '"';
+    return atom(os.str());
+  }
+
+  static PyExpr unary(const PyExpr &operand, StringRef op, Precedence prec) {
+    PyExpr result{.prec = prec};
+    result.str = (op + (operand.prec > prec ? ("(" + Twine(operand.str) + ")")
+                                            : Twine(operand.str)))
+                     .str();
+    return result;
+  }
+
   static PyExpr binary(const PyExpr &lhs, const PyExpr &rhs, StringRef op,
                        Precedence prec) {
     PyExpr result{.prec = prec};
@@ -80,28 +97,175 @@ struct PyExpr {
     return result;
   }
 
-  static PyExpr call(const PyExpr &func, ArrayRef<PyExpr> args, StringRef left,
-                     StringRef right) {
+  template <char Left, char Right>
+  static PyExpr callLike(const PyExpr &func, ArrayRef<PyExpr> args) {
     PyExpr result{.prec = CALL};
     result.str =
         (func.prec > CALL ? ("(" + Twine(func.str) + ")") : Twine(func.str))
             .str();
-    result.str += left;
+    result.str += Left;
     StringRef separator = "";
     for (const PyExpr &arg : args) {
       result.str += separator;
       result.str += arg.str;
       separator = ", ";
     }
-    result.str += right;
+    result.str += Right;
     return result;
   }
 
-  static PyExpr callUnary(StringRef func, StringRef arg, StringRef left,
-                          StringRef right) {
-    return {.str = (Twine() + func + left + arg + right).str(), .prec = CALL};
+  static PyExpr call(const PyExpr &func, ArrayRef<PyExpr> args) {
+    return callLike<'(', ')'>(func, args);
+  }
+
+  static PyExpr subscription(const PyExpr &base, ArrayRef<PyExpr> indices) {
+    return callLike<'[', ']'>(base, indices);
   }
 };
+
+StringRef getCmpFPredicate(arith::CmpFPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpFPredicate::OEQ:
+  case arith::CmpFPredicate::UEQ:
+    return "==";
+  case arith::CmpFPredicate::OGT:
+  case arith::CmpFPredicate::UGT:
+    return ">";
+  case arith::CmpFPredicate::OGE:
+  case arith::CmpFPredicate::UGE:
+    return ">=";
+  case arith::CmpFPredicate::OLT:
+  case arith::CmpFPredicate::ULT:
+    return "<";
+  case arith::CmpFPredicate::OLE:
+  case arith::CmpFPredicate::ULE:
+    return "<=";
+  case arith::CmpFPredicate::ONE:
+  case arith::CmpFPredicate::UNE:
+    return "!=";
+  default:
+    llvm_unreachable("unsupported predicate");
+  }
+}
+
+StringRef getCmpIPredicate(arith::CmpIPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpIPredicate::eq:
+    return "==";
+  case arith::CmpIPredicate::ne:
+    return "!=";
+  case arith::CmpIPredicate::slt:
+  case arith::CmpIPredicate::ult:
+    return "<";
+  case arith::CmpIPredicate::sle:
+  case arith::CmpIPredicate::ule:
+    return "<=";
+  case arith::CmpIPredicate::sgt:
+  case arith::CmpIPredicate::ugt:
+    return ">";
+  case arith::CmpIPredicate::sge:
+  case arith::CmpIPredicate::uge:
+    return ">=";
+  default:
+    llvm_unreachable("unsupported predicate");
+  }
+}
+
+template <typename Op>
+struct BinOpTraits {};
+template <PyExpr::Precedence Prec, char... OpStr>
+struct OpImpl {
+  static constexpr const char opStr[] = {OpStr..., '\0'};
+  static constexpr PyExpr::Precedence prec = Prec;
+};
+template <char... OpStr>
+struct CallImpl {
+  static constexpr const char opStr[] = {'T', '.', OpStr..., '\0'};
+};
+
+template <>
+struct BinOpTraits<arith::AddFOp> : OpImpl<PyExpr::ADD, '+'> {};
+template <>
+struct BinOpTraits<arith::AddIOp> : OpImpl<PyExpr::ADD, '+'> {};
+template <>
+struct BinOpTraits<arith::DivFOp> : OpImpl<PyExpr::MUL, '/'> {};
+template <>
+struct BinOpTraits<arith::MulFOp> : OpImpl<PyExpr::MUL, '*'> {};
+template <>
+struct BinOpTraits<arith::MulIOp> : OpImpl<PyExpr::MUL, '*'> {};
+template <>
+struct BinOpTraits<arith::RemFOp> : OpImpl<PyExpr::MUL, '%'> {};
+// TODO: Make sure the '%' here always follows the same semantics.
+template <>
+struct BinOpTraits<arith::RemSIOp> : OpImpl<PyExpr::MUL, '%'> {};
+template <>
+struct BinOpTraits<arith::RemUIOp> : OpImpl<PyExpr::MUL, '%'> {};
+template <>
+struct BinOpTraits<arith::ShLIOp> : OpImpl<PyExpr::SHIFT, '<', '<'> {};
+template <>
+struct BinOpTraits<arith::ShRSIOp> : OpImpl<PyExpr::SHIFT, '>', '>'> {};
+template <>
+struct BinOpTraits<arith::ShRUIOp> : OpImpl<PyExpr::SHIFT, '>', '>'> {};
+template <>
+struct BinOpTraits<arith::SubFOp> : OpImpl<PyExpr::ADD, '-'> {};
+template <>
+struct BinOpTraits<arith::SubIOp> : OpImpl<PyExpr::ADD, '-'> {};
+template <>
+struct BinOpTraits<arith::XOrIOp> : OpImpl<PyExpr::BITXOR, '^'> {};
+// TODO: Make sure the divisions here always follow the same semantics.
+template <>
+struct BinOpTraits<arith::CeilDivSIOp>
+    : CallImpl<'c', 'e', 'i', 'l', 'd', 'i', 'v'> {};
+template <>
+struct BinOpTraits<arith::CeilDivUIOp>
+    : CallImpl<'c', 'e', 'i', 'l', 'd', 'i', 'v'> {};
+template <>
+struct BinOpTraits<arith::DivSIOp>
+    : CallImpl<'t', 'r', 'u', 'n', 'c', 'd', 'i', 'v'> {};
+template <>
+struct BinOpTraits<arith::DivUIOp>
+    : CallImpl<'t', 'r', 'u', 'n', 'c', 'd', 'i', 'v'> {};
+template <>
+struct BinOpTraits<arith::FloorDivSIOp>
+    : CallImpl<'f', 'l', 'o', 'o', 'r', 'd', 'i', 'v'> {};
+template <>
+struct BinOpTraits<arith::MaximumFOp> : CallImpl<'m', 'a', 'x'> {};
+template <>
+struct BinOpTraits<arith::MaxNumFOp> : CallImpl<'m', 'a', 'x'> {};
+template <>
+struct BinOpTraits<arith::MaxSIOp> : CallImpl<'m', 'a', 'x'> {};
+template <>
+struct BinOpTraits<arith::MaxUIOp> : CallImpl<'m', 'a', 'x'> {};
+template <>
+struct BinOpTraits<arith::MinimumFOp> : CallImpl<'m', 'i', 'n'> {};
+template <>
+struct BinOpTraits<arith::MinNumFOp> : CallImpl<'m', 'i', 'n'> {};
+template <>
+struct BinOpTraits<arith::MinSIOp> : CallImpl<'m', 'i', 'n'> {};
+template <>
+struct BinOpTraits<arith::MinUIOp> : CallImpl<'m', 'i', 'n'> {};
+template <>
+struct BinOpTraits<math::AbsFOp> : CallImpl<'a', 'b', 's'> {};
+template <>
+struct BinOpTraits<math::AbsIOp> : CallImpl<'a', 'b', 's'> {};
+template <>
+struct BinOpTraits<math::CeilOp> : CallImpl<'c', 'e', 'i', 'l'> {};
+template <>
+struct BinOpTraits<math::CosOp> : CallImpl<'c', 'o', 's'> {};
+template <>
+struct BinOpTraits<math::ExpOp> : CallImpl<'e', 'x', 'p'> {};
+template <>
+struct BinOpTraits<math::FloorOp> : CallImpl<'f', 'l', 'o', 'o', 'r'> {};
+template <>
+struct BinOpTraits<math::LogOp> : CallImpl<'l', 'o', 'g'> {};
+template <>
+struct BinOpTraits<math::Log2Op> : CallImpl<'l', 'o', 'g', '2'> {};
+template <>
+struct BinOpTraits<math::SinOp> : CallImpl<'s', 'i', 'n'> {};
+template <>
+struct BinOpTraits<math::SqrtOp> : CallImpl<'s', 'q', 'r', 't'> {};
+template <>
+struct BinOpTraits<math::TanOp> : CallImpl<'t', 'a', 'n'> {};
 
 struct TypeNameMapper {
   llvm::SmallDenseMap<Type, StringRef> names;
@@ -157,16 +321,59 @@ public:
             [&](auto) -> PyExpr { llvm_unreachable("unsupported attribute"); });
   }
 
+  template <typename... Operands>
+  PyExpr makeCall(std::string f, Operands... operands) {
+    return PyExpr::call(PyExpr::atom(std::move(f)), {get(operands)...});
+  }
+
+  PyExpr makeUnary(Value operand, StringRef op, PyExpr::Precedence prec) {
+    return PyExpr::unary(get(operand), op, prec);
+  }
+
   PyExpr makeBinary(Value lhs, Value rhs, StringRef op,
                     PyExpr::Precedence prec) {
     return PyExpr::binary(get(lhs), get(rhs), op, prec);
+  }
+
+  template <typename... Ops>
+  void matchUnaryOp(llvm::TypeSwitch<Operation *, PyExpr> &switcher) {
+    (switcher.Case<Ops>([&](Ops op) {
+      return makeUnary(op.getOperand(), BinOpTraits<Ops>::opStr,
+                       BinOpTraits<Ops>::prec);
+    }),
+     ...);
+  }
+
+  template <typename... Ops>
+  void matchBinaryOp(llvm::TypeSwitch<Operation *, PyExpr> &switcher) {
+    (switcher.Case<Ops>([&](Ops op) {
+      return makeBinary(op.getLhs(), op.getRhs(), BinOpTraits<Ops>::opStr,
+                        BinOpTraits<Ops>::prec);
+    }),
+     ...);
+  }
+
+  template <typename... Ops>
+  void matchUnaryCall(llvm::TypeSwitch<Operation *, PyExpr> &switcher) {
+    (switcher.Case<Ops>([&](Ops op) {
+      return makeCall(BinOpTraits<Ops>::opStr, op.getOperand());
+    }),
+     ...);
+  }
+
+  template <typename... Ops>
+  void matchBinaryCall(llvm::TypeSwitch<Operation *, PyExpr> &switcher) {
+    (switcher.Case<Ops>([&](Ops op) {
+      return makeCall(BinOpTraits<Ops>::opStr, op.getLhs(), op.getRhs());
+    }),
+     ...);
   }
 
   PyExpr makeSubscription(Value base, ValueRange subscripts) {
     auto target = get(base);
     auto indices = llvm::map_to_vector(subscripts,
                                        [&](Value index) { return get(index); });
-    return PyExpr::call(target, indices, "[", "]");
+    return PyExpr::subscription(target, indices);
   }
 
   PyExpr get(Value value) {
@@ -177,112 +384,66 @@ public:
     assert(op && "BlockArgument is not defined. Remember to call createVar().");
     assert(op->hasTrait<OpTrait::OneResult>() &&
            "Expression Ops should always return only one result.");
-    PyExpr result =
-        llvm::TypeSwitch<Operation *, PyExpr>(op)
-            .Case<arith::AddFOp, arith::AddIOp>([&](auto op) {
-              return makeBinary(op.getLhs(), op.getRhs(), "+", PyExpr::ADD);
-            })
-            .Case<arith::SubFOp, arith::SubIOp>([&](auto op) {
-              return makeBinary(op.getLhs(), op.getRhs(), "-", PyExpr::ADD);
-            })
-            .Case<arith::MulFOp, arith::MulIOp>([&](auto op) {
-              return makeBinary(op.getLhs(), op.getRhs(), "*", PyExpr::MUL);
-            })
-            .Case<arith::DivFOp>([&](auto op) {
-              return makeBinary(op.getLhs(), op.getRhs(), "/", PyExpr::MUL);
-            })
-            .Case<arith::DivUIOp>([&](arith::DivUIOp op) {
-              return makeBinary(op.getLhs(), op.getRhs(), "//", PyExpr::MUL);
-            })
-            .Case<arith::RemUIOp>([&](arith::RemUIOp op) {
-              return makeBinary(op.getLhs(), op.getRhs(), "%", PyExpr::MUL);
-            })
-            .Case<arith::CmpIOp>([&](arith::CmpIOp op) {
-              StringRef opStr;
-              switch (op.getPredicate()) {
-              case arith::CmpIPredicate::eq:
-                opStr = "==";
-                break;
-              case arith::CmpIPredicate::ne:
-                opStr = "!=";
-                break;
-              case arith::CmpIPredicate::slt:
-                opStr = "<";
-                break;
-              case arith::CmpIPredicate::sle:
-                opStr = "<=";
-                break;
-              case arith::CmpIPredicate::sgt:
-                opStr = ">";
-                break;
-              case arith::CmpIPredicate::sge:
-                opStr = ">=";
-                break;
-              case arith::CmpIPredicate::ult:
-                opStr = "<";
-                break;
-              case arith::CmpIPredicate::ule:
-                opStr = "<=";
-                break;
-              case arith::CmpIPredicate::ugt:
-                opStr = ">";
-                break;
-              case arith::CmpIPredicate::uge:
-                opStr = ">=";
-                break;
-              default:
-                llvm_unreachable("unsupported predicate");
-              }
-              return makeBinary(op.getLhs(), op.getRhs(), opStr, PyExpr::COMP);
-            })
-            .Case<arith::MaxNumFOp, arith::MaximumFOp>([&](auto op) {
-              return PyExpr::call(PyExpr::atom("T.max"),
-                                  {get(op.getLhs()), get(op.getRhs())}, "(",
-                                  ")");
-            })
-            .Case<arith::MinNumFOp, arith::MinimumFOp>([&](auto op) {
-              return PyExpr::call(PyExpr::atom("T.min"),
-                                  {get(op.getLhs()), get(op.getRhs())}, "(",
-                                  ")");
-            })
-            .Case<arith::AndIOp>([&](arith::AndIOp op) {
-              StringRef opStr = "&";
-              PyExpr::Precedence prec = PyExpr::BITAND;
-              if (op.getType().isInteger(1)) {
-                opStr = "and";
-                prec = PyExpr::AND;
-              }
-              return makeBinary(op.getLhs(), op.getRhs(), opStr, prec);
-            })
-            .Case<arith::ConstantOp>([&](arith::ConstantOp op) {
-              return makeConstant(op.getValue());
-            })
-            .Case<math::ExpOp>([&](math::ExpOp op) {
-              return PyExpr{.str = llvm::formatv("T.exp({0}, dtype=\"{1}\")",
-                                                 get(op.getOperand()).str,
-                                                 typeNames.get(op.getType())),
-                            .prec = PyExpr::CALL};
-            })
-            .Case<tvm::IfThenElseOp>([&](tvm::IfThenElseOp op) {
-              return PyExpr::call(PyExpr::atom("T.if_then_else"),
-                                  {get(op.getCondition()),
-                                   get(op.getTrueValue()),
-                                   get(op.getFalseValue())},
-                                  "(", ")");
-            })
-            .Case<tvm::MaxValueOp>([&](tvm::MaxValueOp op) {
-              return PyExpr::callUnary(
-                  "T.max_value", typeNames.get(op.getType()), "(\"", "\")");
-            })
-            .Case<tvm::MinValueOp>([&](tvm::MinValueOp op) {
-              return PyExpr::callUnary(
-                  "T.min_value", typeNames.get(op.getType()), "(\"", "\")");
-            })
-            .Case<tvm::RefOp>([&](tvm::RefOp op) {
-              return makeSubscription(op.getMemRef(), op.getIndices());
-            })
-            .Default(
-                [&](auto) -> PyExpr { llvm_unreachable("unsupported op"); });
+    llvm::TypeSwitch<Operation *, PyExpr> switcher(op);
+    matchBinaryOp<arith::AddFOp, arith::AddIOp, arith::DivFOp, arith::MulFOp,
+                  arith::MulIOp, arith::RemFOp, arith::RemSIOp, arith::RemUIOp,
+                  arith::ShLIOp, arith::ShRSIOp, arith::ShRUIOp, arith::SubFOp,
+                  arith::SubIOp, arith::XOrIOp>(switcher);
+    matchBinaryCall<arith::CeilDivSIOp, arith::CeilDivUIOp, arith::DivSIOp,
+                    arith::DivUIOp, arith::FloorDivSIOp, arith::MaximumFOp,
+                    arith::MaxNumFOp, arith::MaxSIOp, arith::MaxUIOp,
+                    arith::MinimumFOp, arith::MinNumFOp, arith::MinSIOp,
+                    arith::MinUIOp>(switcher);
+    matchUnaryCall<math::AbsFOp, math::AbsIOp, math::CeilOp, math::CosOp,
+                   math::ExpOp, math::FloorOp, math::LogOp, math::Log2Op,
+                   math::SinOp, math::SqrtOp, math::TanOp>(switcher);
+    // TODO: arith::NegFOp
+    switcher
+        .Case<arith::AndIOp>([&](arith::AndIOp op) {
+          StringRef opStr = "&";
+          PyExpr::Precedence prec = PyExpr::BITAND;
+          if (op.getType().isInteger(1)) {
+            opStr = "and";
+            prec = PyExpr::AND;
+          }
+          return makeBinary(op.getLhs(), op.getRhs(), opStr, prec);
+        })
+        .Case<arith::CmpFOp>([&](auto op) {
+          return makeBinary(op.getLhs(), op.getRhs(),
+                            getCmpFPredicate(op.getPredicate()), PyExpr::COMP);
+        })
+        .Case<arith::CmpIOp>([&](auto op) {
+          return makeBinary(op.getLhs(), op.getRhs(),
+                            getCmpIPredicate(op.getPredicate()), PyExpr::COMP);
+        })
+        .Case<arith::ConstantOp>(
+            [&](arith::ConstantOp op) { return makeConstant(op.getValue()); })
+        .Case<arith::OrIOp>([&](arith::OrIOp op) {
+          StringRef opStr = "|";
+          PyExpr::Precedence prec = PyExpr::BITOR;
+          if (op.getType().isInteger(1)) {
+            opStr = "or";
+            prec = PyExpr::OR;
+          }
+          return makeBinary(op.getLhs(), op.getRhs(), opStr, prec);
+        })
+        .Case<tvm::IfThenElseOp>([&](tvm::IfThenElseOp op) {
+          return makeCall("T.if_then_else", op.getCondition(),
+                          op.getTrueValue(), op.getFalseValue());
+        })
+        .Case<tvm::MaxValueOp>([&](tvm::MaxValueOp op) {
+          return PyExpr::call(PyExpr::atom("T.max_value"),
+                              PyExpr::literal(typeNames.get(op.getType())));
+        })
+        .Case<tvm::MinValueOp>([&](tvm::MinValueOp op) {
+          return PyExpr::call(PyExpr::atom("T.min_value"),
+                              PyExpr::literal(typeNames.get(op.getType())));
+        })
+        .Case<tvm::RefOp>([&](tvm::RefOp op) {
+          return makeSubscription(op.getMemRef(), op.getIndices());
+        });
+    auto result = switcher.Default(
+        [&](auto) -> PyExpr { llvm_unreachable("unsupported op"); });
     auto [it, inserted] = exprs.try_emplace(value, std::move(result));
     assert(inserted && "Cyclic dependencies in values");
     return it->second;
