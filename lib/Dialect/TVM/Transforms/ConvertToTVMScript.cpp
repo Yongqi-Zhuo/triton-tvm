@@ -12,7 +12,7 @@
 
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
 #include "triton-tvm/Dialect/TVM/Transforms/Passes.h"
-#include "triton-tvm/Utils/Python.hpp"
+#include "triton-tvm/Utils/Python.h"
 
 #define DEBUG_TYPE "convert-to-tvmscript"
 
@@ -21,27 +21,288 @@ namespace mlir::tvm {
 #define GEN_PASS_DEF_CONVERTTOTVMSCRIPT
 #include "triton-tvm/Dialect/TVM/Transforms/Passes.h.inc"
 
+namespace {
+
+std::string escapeString(StringRef value) {
+  std::string ret;
+  llvm::raw_string_ostream os(ret);
+  os.write_escaped(value);
+  return os.str();
+}
+
+struct PyExpr {
+  enum Precedence : int {
+    // Literals, parenthesized expressions, ...
+    ATOM = 0,
+    // Function calls, subscriptions, ...
+    CALL,
+    // Multiplication, division, modulo, ...
+    MUL,
+    // Addition, subtraction
+    ADD,
+    // Bitwise shift
+    SHIFT,
+    // Bitwise AND
+    BITAND,
+    // Bitwise XOR
+    BITXOR,
+    // Bitwise OR
+    BITOR,
+    // Comparison operators
+    COMP,
+    // Boolean NOT
+    NOT,
+    // Boolean AND
+    AND,
+    // Boolean OR
+    OR,
+  };
+  std::string str;
+  Precedence prec;
+
+  static PyExpr atom(std::string value) {
+    return {.str = std::move(value), .prec = ATOM};
+  }
+
+  static PyExpr binary(const PyExpr &lhs, const PyExpr &rhs, StringRef op,
+                       Precedence prec) {
+    PyExpr result{.prec = prec};
+    // Parenthesize if necessary.
+    result.str =
+        (
+            // lhs
+            (lhs.prec > prec ? ("(" + Twine(lhs.str) + ")") : Twine(lhs.str)) +
+            // op
+            " " + op + " " +
+            // rhs
+            (rhs.prec >= prec ? ("(" + Twine(rhs.str) + ")") : Twine(rhs.str)))
+            .str();
+    return result;
+  }
+
+  static PyExpr call(const PyExpr &func, ArrayRef<PyExpr> args, StringRef left,
+                     StringRef right) {
+    PyExpr result{.prec = CALL};
+    result.str =
+        (func.prec > CALL ? ("(" + Twine(func.str) + ")") : Twine(func.str))
+            .str();
+    result.str += left;
+    StringRef separator = "";
+    for (const PyExpr &arg : args) {
+      result.str += separator;
+      result.str += arg.str;
+      separator = ", ";
+    }
+    result.str += right;
+    return result;
+  }
+
+  static PyExpr callUnary(StringRef func, StringRef arg, StringRef left,
+                          StringRef right) {
+    return {.str = (Twine() + func + left + arg + right).str(), .prec = CALL};
+  }
+};
+
+struct TypeNameMapper {
+  llvm::SmallDenseMap<Type, StringRef> names;
+  TypeNameMapper(MLIRContext *ctx)
+      : names{
+            {IndexType::get(ctx), "int64"},
+            {IntegerType::get(ctx, 64), "int64"},
+            {IntegerType::get(ctx, 32), "int32"},
+            {IntegerType::get(ctx, 16), "int16"},
+            {IntegerType::get(ctx, 1), "bool"},
+            {FloatType::getF64(ctx), "float64"},
+            {FloatType::getF32(ctx), "float32"},
+            {FloatType::getF16(ctx), "float16"},
+        } {}
+  StringRef get(Type type) const { return names.at(type); }
+};
+
+class PyEval {
+  const TypeNameMapper &typeNames;
+  DenseMap<Value, PyExpr> exprs;
+
+public:
+  PyEval(const TypeNameMapper &typeNames) : typeNames(typeNames) {}
+
+  std::string createVar(Value value, StringRef prefix = "v") {
+    auto var = PyExpr::atom((prefix + Twine(exprs.size())).str());
+    auto [it, inserted] = exprs.try_emplace(value, std::move(var));
+    assert(inserted && "value already exists");
+    return it->second.str;
+  }
+
+  PyExpr makeConstant(Attribute attr) {
+    return llvm::TypeSwitch<Attribute, PyExpr>(attr)
+        .Case<IntegerAttr>([&](IntegerAttr intAttr) {
+          return PyExpr{.str = llvm::formatv("T.{0}({1})",
+                                             typeNames.get(intAttr.getType()),
+                                             intAttr.getValue()),
+                        .prec = PyExpr::CALL};
+        })
+        .Case<FloatAttr>([&](FloatAttr floatAttr) {
+          return PyExpr{.str = llvm::formatv(
+                            "T.{0}({1})", typeNames.get(floatAttr.getType()),
+                            floatAttr.getValue().convertToDouble()),
+                        .prec = PyExpr::CALL};
+        })
+        .Case<StringAttr>([&](StringAttr strAttr) {
+          return PyExpr::atom(escapeString(strAttr.getValue()));
+        })
+        .Default(
+            [&](auto) -> PyExpr { llvm_unreachable("unsupported attribute"); });
+  }
+
+  PyExpr makeBinary(Value lhs, Value rhs, StringRef op,
+                    PyExpr::Precedence prec) {
+    return PyExpr::binary(get(lhs), get(rhs), op, prec);
+  }
+
+  PyExpr makeSubscription(Value base, ValueRange subscripts) {
+    auto target = get(base);
+    auto indices = llvm::map_to_vector(subscripts,
+                                       [&](Value index) { return get(index); });
+    return PyExpr::call(target, indices, "[", "]");
+  }
+
+  PyExpr get(Value value) {
+    if (auto it = exprs.find(value); it != exprs.end()) {
+      return it->second;
+    }
+    auto *op = value.getDefiningOp();
+    assert(op && "BlockArgument is not defined. Remember to call createVar().");
+    assert(op->hasTrait<OpTrait::OneResult>() &&
+           "Expression Ops should always return only one result.");
+    PyExpr result =
+        llvm::TypeSwitch<Operation *, PyExpr>(op)
+            .Case<arith::AddFOp, arith::AddIOp>([&](auto op) {
+              return makeBinary(op.getLhs(), op.getRhs(), "+", PyExpr::ADD);
+            })
+            .Case<arith::SubFOp, arith::SubIOp>([&](auto op) {
+              return makeBinary(op.getLhs(), op.getRhs(), "-", PyExpr::ADD);
+            })
+            .Case<arith::MulFOp, arith::MulIOp>([&](auto op) {
+              return makeBinary(op.getLhs(), op.getRhs(), "*", PyExpr::MUL);
+            })
+            .Case<arith::DivFOp>([&](auto op) {
+              return makeBinary(op.getLhs(), op.getRhs(), "/", PyExpr::MUL);
+            })
+            .Case<arith::DivUIOp>([&](arith::DivUIOp op) {
+              return makeBinary(op.getLhs(), op.getRhs(), "//", PyExpr::MUL);
+            })
+            .Case<arith::RemUIOp>([&](arith::RemUIOp op) {
+              return makeBinary(op.getLhs(), op.getRhs(), "%", PyExpr::MUL);
+            })
+            .Case<arith::CmpIOp>([&](arith::CmpIOp op) {
+              StringRef opStr;
+              switch (op.getPredicate()) {
+              case arith::CmpIPredicate::eq:
+                opStr = "==";
+                break;
+              case arith::CmpIPredicate::ne:
+                opStr = "!=";
+                break;
+              case arith::CmpIPredicate::slt:
+                opStr = "<";
+                break;
+              case arith::CmpIPredicate::sle:
+                opStr = "<=";
+                break;
+              case arith::CmpIPredicate::sgt:
+                opStr = ">";
+                break;
+              case arith::CmpIPredicate::sge:
+                opStr = ">=";
+                break;
+              case arith::CmpIPredicate::ult:
+                opStr = "<";
+                break;
+              case arith::CmpIPredicate::ule:
+                opStr = "<=";
+                break;
+              case arith::CmpIPredicate::ugt:
+                opStr = ">";
+                break;
+              case arith::CmpIPredicate::uge:
+                opStr = ">=";
+                break;
+              default:
+                llvm_unreachable("unsupported predicate");
+              }
+              return makeBinary(op.getLhs(), op.getRhs(), opStr, PyExpr::COMP);
+            })
+            .Case<arith::MaxNumFOp, arith::MaximumFOp>([&](auto op) {
+              return PyExpr::call(PyExpr::atom("T.max"),
+                                  {get(op.getLhs()), get(op.getRhs())}, "(",
+                                  ")");
+            })
+            .Case<arith::MinNumFOp, arith::MinimumFOp>([&](auto op) {
+              return PyExpr::call(PyExpr::atom("T.min"),
+                                  {get(op.getLhs()), get(op.getRhs())}, "(",
+                                  ")");
+            })
+            .Case<arith::AndIOp>([&](arith::AndIOp op) {
+              StringRef opStr = "&";
+              PyExpr::Precedence prec = PyExpr::BITAND;
+              if (op.getType().isInteger(1)) {
+                opStr = "and";
+                prec = PyExpr::AND;
+              }
+              return makeBinary(op.getLhs(), op.getRhs(), opStr, prec);
+            })
+            .Case<arith::ConstantOp>([&](arith::ConstantOp op) {
+              return makeConstant(op.getValue());
+            })
+            .Case<math::ExpOp>([&](math::ExpOp op) {
+              return PyExpr{.str = llvm::formatv("T.exp({0}, dtype=\"{1}\")",
+                                                 get(op.getOperand()).str,
+                                                 typeNames.get(op.getType())),
+                            .prec = PyExpr::CALL};
+            })
+            .Case<tvm::IfThenElseOp>([&](tvm::IfThenElseOp op) {
+              return PyExpr::call(PyExpr::atom("T.if_then_else"),
+                                  {get(op.getCondition()),
+                                   get(op.getTrueValue()),
+                                   get(op.getFalseValue())},
+                                  "(", ")");
+            })
+            .Case<tvm::MaxValueOp>([&](tvm::MaxValueOp op) {
+              return PyExpr::callUnary(
+                  "T.max_value", typeNames.get(op.getType()), "(\"", "\")");
+            })
+            .Case<tvm::MinValueOp>([&](tvm::MinValueOp op) {
+              return PyExpr::callUnary(
+                  "T.min_value", typeNames.get(op.getType()), "(\"", "\")");
+            })
+            .Case<tvm::RefOp>([&](tvm::RefOp op) {
+              return makeSubscription(op.getMemRef(), op.getIndices());
+            })
+            .Default(
+                [&](auto) -> PyExpr { llvm_unreachable("unsupported op"); });
+    auto [it, inserted] = exprs.try_emplace(value, std::move(result));
+    assert(inserted && "Cyclic dependencies in values");
+    return it->second;
+  }
+};
+
+} // namespace
+
 class ConvertToTVMScriptPass
     : public impl::ConvertToTVMScriptBase<ConvertToTVMScriptPass> {
 
   using Self = ConvertToTVMScriptPass;
 
+  std::optional<TypeNameMapper> typeNames;
+
   std::optional<PythonCodePrinter> printer;
 
-  DenseMap<Value, std::string> varNames;
+  std::optional<PyEval> exprs;
 
-  llvm::SmallDenseMap<Type, StringRef> typeNames;
+  inline StringRef typeName(Type type) const { return typeNames->get(type); }
 
-  inline StringRef typeName(Type type) const { return typeNames.at(type); }
-
-  inline std::string createVar(Value value,
-                               [[maybe_unused]] StringRef prefix = "v") {
-    auto it = varNames.find(value);
-    if (it != varNames.end())
-      return it->second;
-    std::string name = (prefix + Twine(varNames.size())).str();
-    varNames.try_emplace(value, name);
-    return name;
+  inline std::string createVar(Value value, StringRef prefix = "v") {
+    return exprs->createVar(value, prefix);
   }
 
   template <typename... Args>
@@ -119,31 +380,7 @@ class ConvertToTVMScriptPass
     }
   }
 
-  inline void printAttr(Attribute attr) {
-    llvm::TypeSwitch<Attribute>(attr)
-        .Case<IntegerAttr>([&](IntegerAttr intAttr) {
-          write("T.{0}({1})", typeName(intAttr.getType()), intAttr.getValue());
-        })
-        .Case<FloatAttr>([&](FloatAttr floatAttr) {
-          write("T.{0}({1})", typeName(floatAttr.getType()),
-                floatAttr.getValue().convertToDouble());
-        })
-        .Case<StringAttr>(
-            [&](StringAttr strAttr) { write("\"{0}\"", strAttr.getValue()); })
-        .Default([&](auto) {
-          emitError(UnknownLoc()) << "unsupported attribute: " << attr;
-          signalPassFailure();
-        });
-  }
-
-  inline void printExpr(Value value) {
-    // TODO!!!
-    if (auto op = value.getDefiningOp<arith::ConstantOp>()) {
-      printAttr(op.getValue());
-    } else {
-      write("{0}", value);
-    }
-  }
+  inline void printExpr(Value value) { writeRaw(exprs->get(value).str); }
 
   void visit(VarOp op) {
     // Example: var0 = T.var("int32")
@@ -226,15 +463,6 @@ class ConvertToTVMScriptPass
     writeLn();
   }
 
-  void visit(IfThenElseOp op) {
-    // Example: T.if_then_else(v0 > T.int32(1), arg0[axis0], T.min_value(0))
-    writeRaw("T.if_then_else");
-    printer->parens([&] { printExpr(op.getCondition()); },
-                    [&] { printExpr(op.getTrueValue()); },
-                    [&] { printExpr(op.getFalseValue()); });
-    writeLn();
-  }
-
   void visit(ReadOp op) {
     // Example: T.reads([buffer0[axis0]])
     writeRaw("T.reads");
@@ -276,15 +504,14 @@ class ConvertToTVMScriptPass
         .Case<BlockOp>([&](BlockOp op) { visit(op); })
         .Case<WhereOp>([&](WhereOp op) { visit(op); })
         .Case<AxisOp>([&](AxisOp op) { visit(op); })
-        .Case<IfThenElseOp>([&](IfThenElseOp op) { visit(op); })
         .Case<ReadOp>([&](ReadOp op) { visit(op); })
         .Case<WriteOp>([&](WriteOp op) { visit(op); })
         .Case<AssignOp>([&](AssignOp op) { visit(op); })
         .Case<InitOp>([&](InitOp op) { visit(op); })
         .Default([&](auto op) {
           // Not important. Just skip.
-          // Note: tvm.ref, tvm.min_value and tvm.max_value should be handled by
-          // printExpr.
+          // Note: tvm.if_then_else, tvm.ref, tvm.min_value and tvm.max_value
+          // should be handled by printExpr.
         });
   }
 
@@ -292,21 +519,13 @@ public:
   using ConvertToTVMScriptBase<ConvertToTVMScriptPass>::ConvertToTVMScriptBase;
 
   void runOnOperation() override {
-    typeNames = {
-        {IndexType::get(&getContext()), "int64"},
-        {IntegerType::get(&getContext(), 64), "int64"},
-        {IntegerType::get(&getContext(), 32), "int32"},
-        {IntegerType::get(&getContext(), 16), "int16"},
-        {IntegerType::get(&getContext(), 1), "bool"},
-        {FloatType::getF64(&getContext()), "float64"},
-        {FloatType::getF32(&getContext()), "float32"},
-        {FloatType::getF16(&getContext()), "float16"},
-    };
-
     auto moduleOp = getOperation();
+
+    typeNames.emplace(&getContext());
     auto ofstream = std::ofstream(outputFilename);
     auto rawOfstream = llvm::raw_os_ostream(ofstream);
     printer.emplace(rawOfstream, 0);
+    exprs.emplace(*typeNames);
 
     writeRawLn("import tvm");
     writeRawLn("import tvm.script");

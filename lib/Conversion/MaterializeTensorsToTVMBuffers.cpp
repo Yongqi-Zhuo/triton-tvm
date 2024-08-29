@@ -305,7 +305,7 @@ SmallVector<Value> mapVarsToAxes(OpBuilder &b, ValueRange extents,
     axes.push_back(b.create<tvm::AxisOp>(
         var.getLoc(),
         b.getAttr<tvm::AxisKindAttr>(rDim.isDimReduced(dim)
-                                         ? tvm::AxisKind::REDUCTION
+                                         ? tvm::AxisKind::REDUCE
                                          : tvm::AxisKind::SPATIAL),
         extent, var));
   }
