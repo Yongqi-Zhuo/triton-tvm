@@ -189,9 +189,9 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
   // Here, warpsPerCTA and threadsPerWarp are in a single loop, and we have to
   // delinearize to get the tensor indices.
   enum Stage {
-    STAGE_WARPS_PER_CTA = 0,
+    STAGE_CTA_TILE = 0,
+    STAGE_WARPS_PER_CTA,
     STAGE_THREADS_PER_WARP,
-    STAGE_CTA_TILE,
     STAGE_SIZE_PER_THREAD,
     STAGE_COUNT,
   };
@@ -215,14 +215,6 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
       unsigned extent = 0;
       tvm::ForKind kind = tvm::ForKind::SERIAL;
       switch (stage) {
-      case STAGE_WARPS_PER_CTA:
-        extent = layoutWarpsPerCTA[dim];
-        kind = tvm::ForKind::THREAD_BINDING;
-        break;
-      case STAGE_THREADS_PER_WARP:
-        extent = layoutThreadsPerWarp[dim];
-        kind = tvm::ForKind::THREAD_BINDING;
-        break;
       case STAGE_CTA_TILE:
         extent = tensor.getDimSize(dim) /
                  (layoutWarpsPerCTA[dim] * layoutThreadsPerWarp[dim] *
@@ -230,6 +222,14 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
         // TODO: Will this work?
         kind = rDim.match(tvm::ForKind::UNROLL, tvm::ForKind::SERIAL,
                           tvm::ForKind::UNROLL);
+        break;
+      case STAGE_WARPS_PER_CTA:
+        extent = layoutWarpsPerCTA[dim];
+        kind = tvm::ForKind::THREAD_BINDING;
+        break;
+      case STAGE_THREADS_PER_WARP:
+        extent = layoutThreadsPerWarp[dim];
+        kind = tvm::ForKind::THREAD_BINDING;
         break;
       case STAGE_SIZE_PER_THREAD:
         extent = layoutSizePerThread[dim];
