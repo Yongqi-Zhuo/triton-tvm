@@ -1,5 +1,9 @@
+import importlib.util
+import sys
+import tempfile
 from triton.backends.driver import DriverBase
 from triton.backends.compiler import GPUTarget
+import tvm.contrib.torch
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -16,14 +20,13 @@ class TVMLauncher(object):
 
     def __call__(
         self,
-        gridX, gridY, gridZ, stream, cu_function,
+        gridX, gridY, gridZ, stream, tvm_module,
         kernel_metadata, launch_metadata,
         launch_enter_hook, launch_exit_hook, *args
     ):
-        print("TVM Launcher called.")
-        print("=== Source ===")
-        print(cu_function.decode("utf-8"))
-        print("===")
+        tvm_module(*args)
+
+_TVM_COUNTER = 0
 
 class TVMUtils(object):
     def __new__(cls):
@@ -45,9 +48,25 @@ class TVMUtils(object):
     # Dummy.
     @staticmethod
     def load_binary(name, kernel_asm, shared, device):
+        tvmscript = kernel_asm.decode("utf-8")
+        print("Building TVM module from script:")
+        print(tvmscript)
+        with tempfile.NamedTemporaryFile(delete=False, mode='w', suffix='.py') as ftvmscript:
+            ftvmscript.write(tvmscript)
+            ftvmscript.flush()
+            global _TVM_COUNTER
+            mod_name = f"__triton_tvm_module_{_TVM_COUNTER}"
+            _TVM_COUNTER += 1
+            spec = importlib.util.spec_from_file_location(mod_name, ftvmscript.name)
+            assert spec is not None, "Failed to create spec from file location"
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[mod_name] = mod
+            spec.loader.exec_module(mod)
+            prim_func = mod.Module[name]
+            wrapped = tvm.contrib.torch.as_torch(prim_func)
         return (
           None,       # module
-          kernel_asm, # function
+          wrapped,    # TVM PackedFunc
           None,       # n_regs
           None        # n_spills
         )

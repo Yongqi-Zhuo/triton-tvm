@@ -2,6 +2,7 @@
 #include "passes.h"
 #include "triton-tvm/Conversion/TritonGPUToTVM/Passes.h"
 #include "triton-tvm/Dialect/TVM/IR/Dialect.h"
+#include "triton-tvm/Dialect/TVM/Transforms/Passes.h"
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/stl_bind.h>
@@ -26,9 +27,17 @@ void init_triton_tvm_passes_ttgpuir(py::module &&m) {
   });
 }
 
+void init_triton_tvm_passes_tvm(py::module &&m) {
+  m.def("add_convert_to_tvmscript", [](mlir::PassManager &pm,
+                                       std::string outputPath) {
+    pm.addPass(mlir::tvm::createConvertToTVMScript({std::move(outputPath)}));
+  });
+}
+
 void init_triton_triton_tvm(py::module &&m) {
   auto passes = m.def_submodule("passes");
   init_triton_tvm_passes_ttgpuir(passes.def_submodule("ttgpuir"));
+  init_triton_tvm_passes_tvm(passes.def_submodule("tvm"));
 
   m.def("load_dialects", [](mlir::MLIRContext &context) {
     mlir::DialectRegistry registry;

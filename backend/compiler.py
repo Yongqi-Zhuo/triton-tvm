@@ -1,9 +1,11 @@
+from dataclasses import dataclass
+import functools
+import hashlib
+import re
+import tempfile
 from triton.backends.compiler import BaseBackend, GPUTarget
 from triton._C.libtriton import ir, passes, nvidia, triton_tvm
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-import hashlib
-import functools
 
 if TYPE_CHECKING:
     from dims_stealer import retrieve_stolen_dims
@@ -123,13 +125,19 @@ class TVMBackend(BaseBackend):
 
     @staticmethod
     def make_tvmir(mod, metadata, opt):
-        metadata["name"] = "kernel_main"
-        stolen_dims = retrieve_stolen_dims()
-        pm = ir.pass_manager(mod.context)
-        pm.enable_debug()
-        triton_tvm.passes.ttgpuir.add_convert_to_tvm(pm, stolen_dims.grid, stolen_dims.shapes, stolen_dims.strides)
-        pm.run(mod)
-        return mod
+        with tempfile.NamedTemporaryFile(mode='r', suffix='.py') as ftvmscript:
+            stolen_dims = retrieve_stolen_dims()
+            pm = ir.pass_manager(mod.context)
+            pm.enable_debug()
+            triton_tvm.passes.ttgpuir.add_convert_to_tvm(pm, stolen_dims.grid, stolen_dims.shapes, stolen_dims.strides)
+            triton_tvm.passes.tvm.add_convert_to_tvmscript(pm, ftvmscript.name)
+            pm.run(mod)
+            with open(ftvmscript.name, 'r') as f:
+                ret = f.read()
+            names = re.findall(r"def ([a-zA-Z_][a-zA-Z0-9_]*)", ret)
+            assert len(names) == 1
+            metadata["name"] = names[0]
+        return ret
 
     def add_stages(self, stages, options):
         stages["ttir"] = lambda src, metadata: self.make_ttir(src, metadata, options)

@@ -538,12 +538,6 @@ Computation computeTensor(OpBuilder &b, Location loc,
         loc, MemRefType::get(shape, allocType.getElementType()),
         b.getStringAttr("shared"));
     result.buffer = buffer;
-
-    // // TODO: make sure this really works and does not break the rewriter.
-    // if (!outerLoopNest.empty()) {
-    //   // Promote this allocation to the root scope.
-    //   buffer->moveBefore(outerLoopNest.front());
-    // }
   }
 
   // 2. Get into the loop nest and create tvm.block.
