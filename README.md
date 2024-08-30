@@ -10,10 +10,10 @@ An MLIR dialect for TVM TensorIR is devised.
 
 | TensorIR | TVM Dialect | Notes |
 |----------|-------------|-------|
-| `for k in range(n): ...` | `scf.for {tvm.for_kind = serial}` | `serial`, `parallel`, `vectorized`, `unroll`, `thread_binding` |
-| `T.int()` | `tvm.var` | |
+| `T.var()` | `tvm.var` | |
 | `T.match_buffer` | `tvm.match_buffer` | |
 | `T.alloc_buffer` | `tvm.alloc_buffer` | |
+| `for k in range(n): ...` | `scf.for {tvm.for_kind = serial}` | `serial`, `parallel`, `vectorized`, `unroll`, `thread_binding` |
 | `T.block` | `tvm.block` | |
 | `T.where` | `tvm.where` | |
 | `T.axis.spatial(k)` | `tvm.axis spatial %k` | `spatial`, `reduce`, `scan`, `opaque` |

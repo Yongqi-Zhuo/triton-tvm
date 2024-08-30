@@ -174,15 +174,15 @@ LoopNest generateLoopNest(OpBuilder &b, Location loc, RankedTensorType tensor,
   LoopsBuilder specsBuilder;
 
   // Here is our loop nest:
-  // for warpsPerCTA[order[r-1]]:
+  // for shape[order[r-1]]/totalPerCTA[order[r-1]]: # unroll
   //  ...
-  //   for warpsPerCTA[order[0]]:
-  //    for threadsPerWarp[order[r-1]]:
+  //   for shape[order[0]]/totalPerCTA[order[0]]: # unroll
+  //    for warpsPerCTA[order[r-1]]:
   //     ...
-  //      for threadsPerWarp[order[0]]:
-  //       for shape[order[r-1]]/totalPerCTA[order[r-1]]: # unroll
+  //      for warpsPerCTA[order[0]]:
+  //       for threadsPerWarp[order[r-1]]:
   //        ...
-  //         for shape[order[0]]/totalPerCTA[order[0]]: # unroll
+  //         for threadsPerWarp[order[0]]:
   //          for sizePerThread[order[r-1]]:
   //           ...
   //            for sizePerThread[order[0]]: # vectorize
@@ -463,8 +463,14 @@ struct Computation {
     });
   }
 
-  SmallVector<Value> inlineFunction(OpBuilder &b, Operation *op,
-                                    ValueRange args) {
+  SmallVector<Value>
+  inlineFunction(OpBuilder &b, Operation *op, ValueRange args,
+                 bool useOuterLoopsIndicesInsteadOfAxes = false) const {
+    auto mapper = this->mapper;
+    if (useOuterLoopsIndicesInsteadOfAxes) {
+      auto outerLoopsIndices = getOuterLoopsIndices();
+      mapper.map(outerLoopsIndices, outerLoopsIndices);
+    }
     auto &generator = op->getRegion(0).front();
     mapper.map(generator.getArguments(), args);
     return inlineRecursively(b, generator, mapper);
@@ -649,14 +655,23 @@ Operation *materializeLoadOp(OpBuilder &b, triton::LoadOp load) {
 
     // Add tvm.if_then_else on demand.
     if (load.getMask()) {
-      auto maskGeneratorOp =
-          cast<tensor::GenerateOp>(load.getMask().getDefiningOp());
-      auto otherGeneratorOp =
-          cast<tensor::GenerateOp>(load.getOther().getDefiningOp());
+      auto maskGeneratorOp = load.getMask().getDefiningOp<tensor::GenerateOp>();
+      auto otherGeneratorValue = load.getOther();
       auto mask = computation.inlineFunction(b, maskGeneratorOp,
                                              innerLoopsAxesAsIndexType)[0];
-      auto other = computation.inlineFunction(b, otherGeneratorOp,
-                                              innerLoopsAxesAsIndexType)[0];
+      Value other;
+      if (otherGeneratorValue) {
+        auto otherGeneratorOp =
+            otherGeneratorValue.getDefiningOp<tensor::GenerateOp>();
+        other = computation.inlineFunction(b, otherGeneratorOp,
+                                           innerLoopsAxesAsIndexType)[0];
+      } else {
+        // The value is undefined, but I don't know if this is supported by TVM.
+        // So here we provide 0. TODO: use ub.poison op.
+        auto elementType = tensorType.getElementType();
+        other = arith::ConstantOp::materialize(b, b.getZeroAttr(elementType),
+                                               elementType, loc);
+      }
       rhs = b.create<tvm::IfThenElseOp>(loc, mask, rhs, other);
     }
 
@@ -721,8 +736,9 @@ void materializeStoreOp(OpBuilder &b, triton::StoreOp store) {
           cast<tensor::GenerateOp>(store.getMask().getDefiningOp());
       // Note that here is a bit different, because in tvm.where we do not use
       // axes, but indices.
-      auto mask = computation.inlineFunction(b, maskGeneratorOp,
-                                             innerLoopsIndicesAsIndexType)[0];
+      auto mask = computation.inlineFunction(
+          b, maskGeneratorOp, innerLoopsIndicesAsIndexType,
+          /*useOuterLoopsIndicesInsteadOfAxes=*/true)[0];
       b.create<tvm::WhereOp>(loc, mask);
     }
 

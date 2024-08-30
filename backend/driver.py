@@ -6,6 +6,9 @@ from triton.backends.compiler import GPUTarget
 import tvm.contrib.torch
 from typing import TYPE_CHECKING
 
+import pycuda.driver
+pycuda.driver.init()
+
 if TYPE_CHECKING:
     from dims_stealer import patch_kernel_interface
 else:
@@ -46,6 +49,19 @@ class TVMUtils(object):
         }
 
     @staticmethod
+    def get_tvm_target():
+        dev = pycuda.driver.Device(0)
+        capability_major = dev.get_attribute(pycuda.driver.device_attribute.COMPUTE_CAPABILITY_MAJOR)
+        capability_minor = dev.get_attribute(pycuda.driver.device_attribute.COMPUTE_CAPABILITY_MINOR)
+        arch = f"sm_{capability_major}{capability_minor}"
+        max_threads_per_block = dev.get_attribute(pycuda.driver.device_attribute.MAX_THREADS_PER_BLOCK)
+        max_num_threads = dev.get_attribute(pycuda.driver.device_attribute.MAX_THREADS_PER_MULTIPROCESSOR)
+        thread_warp_size = dev.get_attribute(pycuda.driver.device_attribute.WARP_SIZE)
+        max_shared_memory_per_block = dev.get_attribute(pycuda.driver.device_attribute.MAX_SHARED_MEMORY_PER_BLOCK)
+        registers_per_block = dev.get_attribute(pycuda.driver.device_attribute.MAX_REGISTERS_PER_BLOCK)
+        return tvm.target.Target(f"cuda -arch={arch} -max_threads_per_block={max_threads_per_block} -max_num_threads={max_num_threads} -thread_warp_size={thread_warp_size} -max_shared_memory_per_block={max_shared_memory_per_block} -registers_per_block={registers_per_block}", host="llvm")
+
+    @staticmethod
     def load_binary(name, kernel_asm, shared, device):
         tvmscript = kernel_asm.decode("utf-8")
         print("Building TVM module from script:")
@@ -63,6 +79,8 @@ class TVMUtils(object):
             spec.loader.exec_module(mod)
             prim_func = mod.Module[name]
             wrapped = tvm.contrib.torch.as_torch(prim_func)
+            target = TVMUtils.get_tvm_target()
+            wrapped.build(target=target)
         return (
           mod_name,   # module
           wrapped,    # TVM PackedFunc
