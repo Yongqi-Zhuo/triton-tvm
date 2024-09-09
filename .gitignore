@@ -31,4 +31,4 @@ cmake-build-*
 *.swp
 
 # For now, do not upload examples
-/example/
+/example/*/**
