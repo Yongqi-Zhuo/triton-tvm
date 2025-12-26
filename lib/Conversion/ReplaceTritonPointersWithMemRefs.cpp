@@ -35,11 +35,7 @@ namespace {
 
 struct AddPtrFolder : public OpConversionPattern<triton::AddPtrOp> {
   using OpConversionPattern<triton::AddPtrOp>::OpConversionPattern;
-  LogicalResult match(triton::AddPtrOp op) const override {
-    // If the base pointer is also an addptr, we can fold the offsets.
-    return success(op.getPtr().getDefiningOp<triton::AddPtrOp>());
-  }
-  void rewrite(triton::AddPtrOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(triton::AddPtrOp op, OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const override {
     // addptr(addptr(base, offset_1), offset_2)
     //        ^^^^^^^^^^^^^^^^^^^^^^
@@ -63,6 +59,7 @@ struct AddPtrFolder : public OpConversionPattern<triton::AddPtrOp> {
         op.getLoc(), op.getType(), innerAddPtr.getPtr(), newOffset);
 
     rewriter.replaceOp(op, newAddPtr);
+    return success();
   }
 };
 
@@ -89,14 +86,7 @@ struct FuncArgToMemRefConverter : public OpConversionPattern<func::FuncOp> {
                            const SmallVectorImpl<TensorSpec> &tensorSpec)
       : OpConversionPattern(ctx), tensorSpec(tensorSpec) {}
 
-  LogicalResult match(func::FuncOp op) const override {
-    return success(
-        llvm::any_of(op.getFunctionType().getInputs(), [](Type argType) {
-          return isa<triton::PointerType>(argType);
-        }));
-  }
-
-  void rewrite(func::FuncOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(func::FuncOp op, OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const override {
     auto funcType = op.getFunctionType();
 
@@ -120,7 +110,7 @@ struct FuncArgToMemRefConverter : public OpConversionPattern<func::FuncOp> {
     if (tensorIndex != tensorSpec.size()) {
       op.emitError("Number of captured tensors does not match the number of "
                    "pointer arguments.");
-      return;
+      return failure();
     }
 
     // Apply the signature conversion at the entry block.
@@ -131,6 +121,7 @@ struct FuncArgToMemRefConverter : public OpConversionPattern<func::FuncOp> {
     auto newFuncType = FunctionType::get(rewriter.getContext(), newInputs,
                                          funcType.getResults());
     rewriter.modifyOpInPlace(op, [&] { op.setType(newFuncType); });
+    return success();
   }
 };
 

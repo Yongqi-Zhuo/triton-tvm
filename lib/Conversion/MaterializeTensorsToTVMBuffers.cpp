@@ -1057,7 +1057,7 @@ public:
           // For later use. Only ops that are in the backward slice of the
           // assign op are required.
           SetVector<Operation *> required;
-          getBackwardSlice(assignOp, &required);
+          (void)getBackwardSlice(assignOp, &required);
           // Now that the slice is collected, we can erase the extract op,
           // and replace with standard tvm.ref, which has no
           // consumer/producer information.

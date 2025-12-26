@@ -125,11 +125,7 @@ struct MakeRangeToTensorConverter
 struct AddPointerToTensorConverter
     : public OpConversionPattern<triton::AddPtrOp> {
   using OpConversionPattern<triton::AddPtrOp>::OpConversionPattern;
-  LogicalResult match(triton::AddPtrOp op) const override {
-    // We only lift addition of tensors to tensors of addition.
-    return success(isa<RankedTensorType>(op.getOperand(0).getType()));
-  }
-  void rewrite(triton::AddPtrOp op, OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(triton::AddPtrOp op, OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const override {
     auto lhs = adaptor.getOperands()[0];
     auto rhs = adaptor.getOperands()[1];
@@ -157,6 +153,7 @@ struct AddPointerToTensorConverter
         });
     tensorGenerate->setDiscardableAttrs(op->getDiscardableAttrDictionary());
     rewriter.replaceOp(op, tensorGenerate);
+    return success();
   }
 };
 
@@ -165,11 +162,7 @@ struct AddPointerToTensorConverter
 template <typename OpTy>
 struct ElementwiseToTensorConverter : public OpConversionPattern<OpTy> {
   using OpConversionPattern<OpTy>::OpConversionPattern;
-  LogicalResult match(OpTy op) const override {
-    // We only lift elementwise ops.
-    return success(isa<RankedTensorType>(op.getResult().getType()));
-  }
-  void rewrite(OpTy op, typename OpConversionPattern<OpTy>::OpAdaptor adaptor,
+  LogicalResult matchAndRewrite(OpTy op, typename OpConversionPattern<OpTy>::OpAdaptor adaptor,
                ConversionPatternRewriter &rewriter) const override {
     auto type = cast<RankedTensorType>(op.getResult().getType());
     auto tensorGenerate = rewriter.create<tensor::GenerateOp>(
@@ -186,6 +179,7 @@ struct ElementwiseToTensorConverter : public OpConversionPattern<OpTy> {
           b.create<tensor::YieldOp>(loc, scalar);
         });
     rewriter.replaceOp(op, tensorGenerate);
+    return success();
   }
 };
 

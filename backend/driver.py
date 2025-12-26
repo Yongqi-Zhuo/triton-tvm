@@ -87,6 +87,31 @@ class TVMUtils(object):
           None,       # n_regs
           None        # n_spills
         )
+    
+
+def ty_to_cpp(ty):
+    if ty[0] == '*':
+        return "CUdeviceptr"
+    if ty.startswith("tensordesc"):
+        return "CUtensorMap"
+    return {
+        "i1": "int8_t",
+        "i8": "int8_t",
+        "i16": "int16_t",
+        "i32": "int32_t",
+        "i64": "int64_t",
+        "u1": "uint8_t",
+        "u8": "uint8_t",
+        "u16": "uint16_t",
+        "u32": "uint32_t",
+        "u64": "uint64_t",
+        "fp16": "double",
+        "bf16": "double",
+        "fp32": "double",
+        "f32": "double",
+        "fp64": "double",
+        "nvTmaDesc": "CUtensorMap",
+    }[ty]
 
 class TVMDriver(DriverBase):
 
@@ -101,6 +126,9 @@ class TVMDriver(DriverBase):
     @staticmethod
     def is_active():
         return False
+    
+    def map_python_to_cpp_type(self, ty: str) -> str:
+        return ty_to_cpp(ty)
 
     def get_device_capability(self):
         return ("tvm", 0)
@@ -116,7 +144,15 @@ class TVMDriver(DriverBase):
         return
 
     def get_current_target(self):
-        return GPUTarget("tvm", 0, 0)
+        return GPUTarget("cuda", 0, 0)
+    
+    def get_active_torch_device(self):
+        import torch
+        return torch.device("cuda", self.get_current_device())
+
+    def get_benchmarker(self):
+        from triton.testing import do_bench
+        return do_bench
 
     def assemble_tensormap_to_arg(self, tensormaps_info, args):
         return args

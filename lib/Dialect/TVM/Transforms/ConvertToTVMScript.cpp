@@ -276,9 +276,9 @@ struct TypeNameMapper {
             {IntegerType::get(ctx, 32), "int32"},
             {IntegerType::get(ctx, 16), "int16"},
             {IntegerType::get(ctx, 1), "bool"},
-            {FloatType::getF64(ctx), "float64"},
-            {FloatType::getF32(ctx), "float32"},
-            {FloatType::getF16(ctx), "float16"},
+            {Float64Type::get(ctx), "float64"},
+            {Float32Type::get(ctx), "float32"},
+            {Float16Type::get(ctx), "float16"},
         } {}
   StringRef get(Type type) const { return names.at(type); }
 };
@@ -702,8 +702,7 @@ public:
   void replaceInfinity() {
     RewritePatternSet patterns(&getContext());
     patterns.add(convertInfinityConstant);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
-                                            std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
       signalPassFailure();
     }
   }
